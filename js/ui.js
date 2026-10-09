@@ -281,6 +281,7 @@ function renderDash() {
     .reduce((a,h)=>h.accion==='PAGO' ? a+(h.monto||0) : h.accion==='REVERSO' ? a-(h.monto||0) : a, 0));
 
   set('s-total', clientes.length);
+  set('s-activos', activos.length);
   set('s-capital', '$'+capital.toLocaleString('es-MX'));
   set('s-morosos', morosos.length);
   set('s-saldo', '$'+saldoTotal.toLocaleString('es-MX'));

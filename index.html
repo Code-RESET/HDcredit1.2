@@ -131,8 +131,11 @@ select.fc option{background:var(--surface)}
 @keyframes fu{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 
 /* STAT CARDS */
-.sg{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:24px}
-.sc{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;position:relative;overflow:hidden;transition:transform var(--trans),border-color var(--trans)}
+.dsec{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;font-weight:700;margin:0 2px 10px}
+.dgroup{margin-bottom:24px}
+.shortcuts{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:22px}
+.sg{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}
+.sc{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;position:relative;overflow:hidden;min-width:0;transition:transform var(--trans),border-color var(--trans)}
 .sc:hover{transform:translateY(-2px);border-color:var(--border2)}
 .sc::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--accent)}
 .sc.w::before{background:var(--warn)}
@@ -144,7 +147,7 @@ select.fc option{background:var(--surface)}
 .sc.d .si{background:rgba(255,69,96,.1);color:var(--danger)}
 .sc.i .si{background:rgba(59,130,246,.1);color:var(--info)}
 .sc.p .si{background:rgba(139,92,246,.1);color:var(--purple)}
-.sv{font-family:'Syne',sans-serif;font-size:1.9rem;font-weight:800;line-height:1}
+.sv{font-family:'Syne',sans-serif;font-size:clamp(1.2rem,4.5vw,1.9rem);font-weight:800;line-height:1.1;overflow-wrap:anywhere}
 .sl{font-size:.76rem;color:var(--muted);margin-top:4px}
 
 /* TABLE */
@@ -380,14 +383,32 @@ tbody tr:last-child td{border-bottom:none}
     </div>
   </div>
   <div class="ca">
-    <div class="sg">
-      <div class="sc"><div class="si"><i class="fas fa-users"></i></div><div class="sv" id="s-total">0</div><div class="sl">Acreditados</div></div>
-      <div class="sc w"><div class="si"><i class="fas fa-money-bill-wave"></i></div><div class="sv" id="s-capital">$0</div><div class="sl">Capital Prestado</div></div>
-      <div class="sc d"><div class="si"><i class="fas fa-exclamation-triangle"></i></div><div class="sv" id="s-morosos">0</div><div class="sl">Morosos</div></div>
-      <div class="sc i"><div class="si"><i class="fas fa-coins"></i></div><div class="sv" id="s-saldo">$0</div><div class="sl">Saldo Pendiente</div></div>
-      <div class="sc p"><div class="si"><i class="fas fa-calendar-check"></i></div><div class="sv" id="s-qcobro">$0</div><div class="sl">Cobro Esta Quincena</div></div>
-      <div class="sc"><div class="si"><i class="fas fa-check-circle"></i></div><div class="sv" id="s-cobrado">$0</div><div class="sl">Cobrado Quincena Actual</div></div>
+    <div class="shortcuts">
+      <button class="btn btn-s btn-sm" onclick="gv('checklist')"><i class="fas fa-check-square"></i> Control de Cobros</button>
+      <button class="btn btn-s btn-sm" onclick="gv('clientes')"><i class="fas fa-users"></i> Acreditados</button>
+      <button class="btn btn-s btn-sm" onclick="gv('morosos')"><i class="fas fa-exclamation-circle"></i> Morosos y Recargos</button>
+      <button class="btn btn-s btn-sm" onclick="descargarReporteCartera()"><i class="fas fa-file-excel" style="color:#1d6f42"></i> Reporte de Cartera</button>
     </div>
+
+    <div class="dgroup">
+      <div class="dsec">Cartera General</div>
+      <div class="sg">
+        <div class="sc"><div class="si"><i class="fas fa-users"></i></div><div class="sv" id="s-total">0</div><div class="sl">Acreditados</div></div>
+        <div class="sc p"><div class="si"><i class="fas fa-user-check"></i></div><div class="sv" id="s-activos">0</div><div class="sl">Acreditados Activos</div></div>
+        <div class="sc w"><div class="si"><i class="fas fa-money-bill-wave"></i></div><div class="sv" id="s-capital">$0</div><div class="sl">Capital Prestado</div></div>
+        <div class="sc i"><div class="si"><i class="fas fa-coins"></i></div><div class="sv" id="s-saldo">$0</div><div class="sl">Saldo Pendiente</div></div>
+      </div>
+    </div>
+
+    <div class="dgroup">
+      <div class="dsec">Esta Quincena y Alertas</div>
+      <div class="sg">
+        <div class="sc p"><div class="si"><i class="fas fa-calendar-check"></i></div><div class="sv" id="s-qcobro">$0</div><div class="sl">Cobro Esperado</div></div>
+        <div class="sc"><div class="si"><i class="fas fa-check-circle"></i></div><div class="sv" id="s-cobrado">$0</div><div class="sl">Cobrado hasta Ahora</div></div>
+        <div class="sc d"><div class="si"><i class="fas fa-exclamation-triangle"></i></div><div class="sv" id="s-morosos">0</div><div class="sl">Morosos</div></div>
+      </div>
+    </div>
+
     <div class="dg">
       <div class="dc">
         <div class="dct"><i class="fas fa-exclamation-circle"></i> Morosos</div>
