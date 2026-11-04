@@ -48,6 +48,20 @@ function nextQBoundary(d) {
   if (day < fin) return new Date(y, m, fin);
   return new Date(y, m + 1, 15);
 }
+// Fecha sin hora (00:00 local) — los vencimientos se comparan por día de
+// calendario, no por hora, para que la regla "atrasado desde el día
+// siguiente" no dependa de la hora en que se abre la app.
+function soloFecha(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+// Primer instante en que un vencimiento ya cuenta como ATRASADO:
+// el día del vencimiento todavía NO es atraso; se marca desde el día siguiente.
+function inicioAtraso(due) { const f = soloFecha(due); f.setDate(f.getDate() + 1); return f; }
+// Días de atraso de un vencimiento (día siguiente al vencimiento = 1 día)
+function diasDeAtraso(due, hoy = new Date()) {
+  const a = soloFecha(due), b = soloFecha(hoy);
+  const dias = Math.round((Date.UTC(b.getFullYear(), b.getMonth(), b.getDate()) - Date.UTC(a.getFullYear(), a.getMonth(), a.getDate())) / 86400000);
+  return Math.max(0, dias);
+}
+
 function qsElapsed(inicio, producto = 'quincenal_fijo') {
   if (!inicio) return 0;
   const start = new Date(inicio + 'T12:00:00');
@@ -57,13 +71,15 @@ function qsElapsed(inicio, producto = 'quincenal_fijo') {
     // Pago único: vence a los 30 días naturales del inicio, sin alinearse a quincenas
     const due = new Date(start);
     due.setDate(due.getDate() + 30);
-    return now >= due ? 1 : 0;
+    return now >= inicioAtraso(due) ? 1 : 0;
   }
   // Sin quincena de gracia: el primer pago vence en el primer día 15/30
   // posterior al inicio, y de ahí en adelante siempre los días 15 y 30.
+  // Una quincena cuenta como vencida (exigible) a partir del día SIGUIENTE
+  // a su vencimiento.
   let d = nextQBoundary(start);
   let count = 0;
-  while (d < now && count < 36) {
+  while (inicioAtraso(d) <= now && count < 36) {
     count++;
     d = nextQBoundary(d);
   }
@@ -85,7 +101,30 @@ function autoBackup() {
   try {
     localStorage.setItem('hd_bk_1', localStorage.getItem('hd_bk_0') || '');
     localStorage.setItem('hd_bk_0', JSON.stringify({ clientes, historial, ts: new Date().toISOString() }));
-  } catch(e) { /* cuota llena — ignorar */ }
+  } catch(e) { reportarError('Respaldo automático', e); }
+}
+
+/* ============================================================
+   ESCRITURAS CON COLA OFFLINE
+   Firestore aplica la escritura en la copia local al instante y la sube
+   cuando hay señal, pero la promesa de commit() no se resuelve hasta que
+   el servidor confirma. Esperarla sin conexión deja la pantalla trabada.
+   Aquí se espera un poco: si el servidor confirma → 'ok'; si rechaza →
+   lanza el error; si no contesta a tiempo → 'pendiente' (queda en cola) y
+   un fallo posterior se registra en el panel de errores.
+============================================================ */
+function esperarEscritura(promesa, origen, ms = 4000) {
+  return new Promise((resolve, reject) => {
+    let listo = false;
+    const t = setTimeout(() => { if (!listo) { listo = true; resolve('pendiente'); } }, ms);
+    promesa.then(
+      () => { if (!listo) { listo = true; clearTimeout(t); resolve('ok'); } },
+      e => {
+        if (!listo) { listo = true; clearTimeout(t); reject(e); }
+        else { reportarError(origen + ' (al subir a la nube)', e); toast('❌ ' + origen + ': no se pudo subir a la nube — revisa el panel de errores', 'err'); }
+      }
+    );
+  });
 }
 
 /* ============================================================
@@ -108,7 +147,14 @@ function onProductoChange() {
   calcPQ();
 }
 
+// Id del acreditado nuevo: se genera UNA vez al abrir el formulario, así que
+// tocar "Guardar" varias veces escribe siempre el mismo documento (no crea
+// copias del mismo préstamo).
+let _nuevoIdPendiente = null, _guardandoCliente = false;
+function nuevoIdCliente() { return 'c_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7); }
+
 function openNew() {
+  _nuevoIdPendiente = nuevoIdCliente();
   document.getElementById('eid').value = '';
   document.getElementById('m-title').textContent = 'Nuevo Acreditado';
   ['f-nom','f-tel','f-notas'].forEach(id => document.getElementById(id).value = '');
@@ -158,17 +204,30 @@ function calcPQ() {
 }
 
 async function saveC() {
+  // Bloqueo: mientras se guarda, más toques a "Guardar" no hacen nada
+  if (_guardandoCliente) return;
+  const btn = document.getElementById('btn-save-c');
+  _guardandoCliente = true;
+  if (btn) btn.disabled = true;
+  try { await _saveC(); }
+  catch(e) { reportarError('Guardar acreditado', e); toast('❌ Error al guardar: ' + e.message, 'err'); }
+  finally { _guardandoCliente = false; if (btn) btn.disabled = false; }
+}
+
+async function _saveC() {
   const nombre = document.getElementById('f-nom').value.trim();
   const producto = document.getElementById('f-producto').value || 'quincenal_fijo';
   const monto = parseInt(document.getElementById('f-monto').value)||0;
   const nq = producto === 'unico_30d' ? 1 : (parseInt(document.getElementById('f-plazo').value)||0);
   const inicio = document.getElementById('f-ini').value;
-  const pagadas = Math.min(parseInt(document.getElementById('f-pag').value)||0, nq);
+  const pagadasRaw = parseInt(document.getElementById('f-pag').value)||0;
   const telefono = document.getElementById('f-tel').value.replace(/\D/g,'').slice(0,10);
   const notas = document.getElementById('f-notas').value.trim();
   const eid = document.getElementById('eid').value;
 
   if (!nombre || !monto || !nq) { toast('Completa los campos requeridos', 'wrn'); return; }
+  if (pagadasRaw < 0) { toast('Las quincenas pagadas no pueden ser negativas', 'err'); return; }
+  const pagadas = Math.min(pagadasRaw, nq);
   let pq;
   if (producto === 'unico_30d') {
     if (!TF30[monto]) { toast('Monto no válido para Préstamo 30 Días', 'err'); return; }
@@ -197,20 +256,27 @@ async function saveC() {
   const data = { nombre, producto, monto, pq, nq, inicio, pagadas, saldo, pagos, telefono, notas,
     alerta: calcAlerta({saldo, pagadas, nq, inicio, producto}), updatedAt: new Date().toISOString() };
 
+  let estado = 'ok';
   if (eid) {
     if (USE_FB) {
-      try { await CLI().doc(eid).set(data, {merge:true}); }
-      catch(e) { toast('No se pudo guardar en la nube: ' + e.message, 'err'); return; }
+      try { estado = await esperarEscritura(CLI().doc(eid).set(data, {merge:true}), 'Guardar acreditado'); }
+      catch(e) { reportarError('Guardar acreditado', e); toast('No se pudo guardar en la nube: ' + e.message, 'err'); return; }
     } else { const i = clientes.findIndex(x=>x.id===eid); if(i>=0) clientes[i]={...clientes[i],...data}; saveLocal(); refresh(); }
-    toast(`${nombre} actualizado`, 'ok');
+    toast(estado === 'pendiente' ? `${nombre} actualizado — pendiente de subir a la nube` : `${nombre} actualizado`, estado === 'pendiente' ? 'wrn' : 'ok');
   } else {
-    const id = 'c_' + Date.now();
+    // Mismo id para todos los intentos de este formulario (ver openNew)
+    const id = _nuevoIdPendiente || (_nuevoIdPendiente = nuevoIdCliente());
     data.id = id; data.createdAt = new Date().toISOString();
     if (USE_FB) {
-      try { await CLI().doc(id).set(data); }
-      catch(e) { toast('No se pudo guardar en la nube: ' + e.message, 'err'); return; }
-    } else { clientes.push(data); saveLocal(); refresh(); }
-    toast(`${nombre} agregado ✅`, 'ok');
+      try { estado = await esperarEscritura(CLI().doc(id).set(data), 'Guardar acreditado'); }
+      catch(e) { reportarError('Guardar acreditado', e); toast('No se pudo guardar en la nube: ' + e.message, 'err'); return; }
+    } else {
+      const i = clientes.findIndex(x => x.id === id);
+      if (i >= 0) clientes[i] = data; else clientes.push(data);
+      saveLocal(); refresh();
+    }
+    _nuevoIdPendiente = null;
+    toast(estado === 'pendiente' ? `${nombre} agregado — pendiente de subir a la nube` : `${nombre} agregado ✅`, estado === 'pendiente' ? 'wrn' : 'ok');
   }
   cm('m-cliente');
 }
@@ -252,22 +318,37 @@ async function delC(id) {
 }
 
 /* ============================================================
-   TOGGLE PAGO
+   REGISTRAR COBRO / REVERSO
+   El botón dice qué quiere hacer ('PAGO' o 'REVERSO'); ya no "invierte"
+   el estado. Si la quincena ya está en ese estado (otro dispositivo la
+   cobró, o se tocó dos veces), no se escribe nada: un segundo cobro nunca
+   anula al primero.
 ============================================================ */
-// Calcula el nuevo estado de un cobro/reverso a partir del arreglo de pagos
-// más reciente conocido. Se usa tanto dentro de la transacción de Firestore
-// como en modo local, para no duplicar la lógica de negocio dos veces.
-function calcularCobro(c, pagosBase, qIdx, qKey) {
-  const pagos = [...(pagosBase || Array(c.nq||12).fill(false))];
-  pagos[qIdx] = !pagos[qIdx];
+const _cobrosEnCurso = new Set();
+function cobroEnCurso(cid) { return _cobrosEnCurso.has(cid); }
+
+// Calcula el nuevo estado a partir del arreglo de pagos más reciente
+// conocido. Devuelve null si no hay nada que cambiar.
+function calcularCobro(c, pagosBase, qIdx, qKey, accion) {
+  if (accion !== 'PAGO' && accion !== 'REVERSO') throw new Error('Acción de cobro inválida: ' + accion);
+  const nq = c.nq || 12;
+  if (!Number.isInteger(qIdx) || qIdx < 0 || qIdx >= nq) throw new Error('Quincena fuera de rango: ' + qIdx);
+  const pagos = Array.isArray(pagosBase)
+    ? [...pagosBase]
+    : Array(nq).fill(false).map((_, j) => j < (c.pagadas || 0));
+  while (pagos.length < nq) pagos.push(false);
+  const deseado = accion === 'PAGO';
+  if (!!pagos[qIdx] === deseado) return null; // ya estaba así — no tocar
+  pagos[qIdx] = deseado;
   const pagadas = pagos.filter(Boolean).length;
   const saldo = Math.max(0, (c.nq - pagadas) * c.pq);
   const alerta = calcAlerta({...c, pagadas, saldo});
   const now = new Date();
   const log = {
-    id: 'h_' + Date.now(), clienteId: c.id, nombre: c.nombre,
+    id: 'h_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    clienteId: c.id, nombre: c.nombre,
     monto: c.pq, qIndex: qIdx, qKey,
-    accion: pagos[qIdx] ? 'PAGO' : 'REVERSO',
+    accion,
     fecha: now.toLocaleDateString('es-MX'),
     hora: now.toLocaleTimeString('es-MX'),
     ts: now.toISOString()
@@ -275,59 +356,108 @@ function calcularCobro(c, pagosBase, qIdx, qKey) {
   return { pagos, pagadas, saldo, alerta, log, now };
 }
 
-async function togglePago(cid, qIdx) {
-  const c = clientes.find(x=>x.id===cid); if(!c) return;
-  const qKey = document.getElementById('qsel').value;
-  let pagos, pagadas, saldo, alerta;
+function camposCliente(r) {
+  return { pagos: r.pagos, pagadas: r.pagadas, saldo: r.saldo, alerta: r.alerta, updatedAt: r.now.toISOString() };
+}
+
+// Refleja el cobro en memoria al instante (en modo Firebase el siguiente
+// snapshot trae lo mismo y lo reemplaza).
+function aplicarCobroEnMemoria(cid, r) {
+  const i = clientes.findIndex(x => x.id === cid);
+  if (i >= 0) clientes[i] = {...clientes[i], pagos: r.pagos, pagadas: r.pagadas, saldo: r.saldo, alerta: r.alerta};
+  if (!historial.some(h => h.id === r.log.id)) historial.unshift(r.log);
+}
+
+// opts: { qKey, sinDeshacer, silencioso }
+// Devuelve { ok:true, estado:'ok'|'pendiente', accion } o
+//          { ok:false, motivo:'sin_cambio'|'ocupado'|'no_existe'|'error' }
+async function registrarCobro(cid, qIdx, accion, opts = {}) {
+  const c = clientes.find(x => x.id === cid);
+  if (!c) { toast('Acreditado no encontrado', 'err'); return { ok:false, motivo:'no_existe' }; }
+  // Bloqueo: mientras un movimiento de este acreditado está en proceso,
+  // no se acepta otro (evita cobros dobles por toques rápidos)
+  if (_cobrosEnCurso.has(cid)) {
+    toast(`Espera: hay un movimiento de ${c.nombre} en proceso`, 'wrn');
+    return { ok:false, motivo:'ocupado' };
+  }
+  _cobrosEnCurso.add(cid);
+  renderCL(); // muestra el botón bloqueado
+  try {
+    return await _registrarCobro(c, cid, qIdx, accion, opts);
+  } catch(e) {
+    reportarError('Registrar ' + accion, e);
+    toast('❌ No se pudo registrar el movimiento: ' + e.message, 'err');
+    return { ok:false, motivo:'error', error:e };
+  } finally {
+    _cobrosEnCurso.delete(cid);
+    renderCL();
+    renderDash();
+  }
+}
+
+async function _registrarCobro(c, cid, qIdx, accion, opts) {
+  const qKey = opts.qKey || document.getElementById('qsel').value;
+  let r = null, estado = 'ok';
 
   if (USE_FB) {
-    let resultado;
-    // Transacción real solo si hay red: una transacción de Firestore necesita
-    // ida y vuelta al servidor, no funciona con la cola offline. Si el
-    // dispositivo está sin conexión, se salta directo al modo de respaldo de
-    // abajo (leer+escribir), que sí encola el cobro y lo sube al volver la señal.
+    let hecho = false;
+    // Con red: transacción real — relee el acreditado en el servidor, así
+    // la decisión "ya estaba cobrado" se toma con el dato más reciente.
     if (navigator.onLine) {
       try {
-        // Firestore relee el documento del acreditado DENTRO de la misma
-        // transacción y reintenta solo si otro dispositivo lo cambió al mismo
-        // tiempo — así dos cobros casi simultáneos ya no se pueden pisar entre sí.
-        resultado = await DB.runTransaction(async (tx) => {
-          const freshSnap = await tx.get(CLI().doc(cid));
-          const freshData = freshSnap.exists ? freshSnap.data() : c;
-          const r = calcularCobro(c, freshData.pagos, qIdx, qKey);
-          tx.set(CLI().doc(cid), {pagos: r.pagos, pagadas: r.pagadas, saldo: r.saldo, alerta: r.alerta, updatedAt: r.now.toISOString()}, {merge:true});
-          tx.set(HIST().doc(r.log.id), r.log);
-          return r;
+        r = await DB.runTransaction(async (tx) => {
+          const ref = CLI().doc(cid);
+          const snap = await tx.get(ref);
+          if (!snap.exists) { const err = new Error('El acreditado ya no existe en la nube'); err.code = 'hd/no-existe'; throw err; }
+          const fresh = {...c, ...snap.data(), id: cid};
+          const res = calcularCobro(fresh, fresh.pagos, qIdx, qKey, accion);
+          if (!res) return null;
+          tx.set(ref, camposCliente(res), {merge:true});
+          tx.set(HIST().doc(res.log.id), res.log);
+          return res;
         });
+        hecho = true;
       } catch(e) {
-        console.warn('HD Crédit — transacción de cobro falló, se intenta modo respaldo:', e.code || e.message);
+        if (e.code === 'hd/no-existe') throw e;
+        console.warn('HD Crédit — transacción de cobro falló, se usa escritura en lote:', e.code || e.message);
       }
     }
-    if (!resultado) {
-      try {
-        const freshSnap = await CLI().doc(cid).get();
-        const freshData = freshSnap.exists ? freshSnap.data() : c;
-        resultado = calcularCobro(c, freshData.pagos, qIdx, qKey);
-        await CLI().doc(cid).set({pagos: resultado.pagos, pagadas: resultado.pagadas, saldo: resultado.saldo, alerta: resultado.alerta, updatedAt: resultado.now.toISOString()}, {merge:true});
-        await HIST().doc(resultado.log.id).set(resultado.log);
-      } catch(e2) {
-        toast('❌ No se pudo registrar el cobro en la nube: ' + e2.message, 'err');
-        return;
+    // Sin red (o la transacción falló): UN SOLO lote atómico con acreditado
+    // + historial. Firestore lo guarda en la cola offline y lo sube completo
+    // o nada. Se usa la copia local más reciente (incluye los cambios
+    // pendientes de este teléfono).
+    if (!hecho) {
+      r = calcularCobro(c, c.pagos, qIdx, qKey, accion);
+      if (r) {
+        const batch = DB.batch();
+        batch.set(CLI().doc(cid), camposCliente(r), {merge:true});
+        batch.set(HIST().doc(r.log.id), r.log);
+        estado = await esperarEscritura(batch.commit(), 'Registrar ' + accion);
       }
     }
-    ({ pagos, pagadas, saldo, alerta } = resultado);
+    if (r) aplicarCobroEnMemoria(cid, r);
   } else {
-    const r = calcularCobro(c, c.pagos, qIdx, qKey);
-    ({ pagos, pagadas, saldo, alerta } = r);
-    const i = clientes.findIndex(x=>x.id===cid);
-    clientes[i] = {...clientes[i], pagos, pagadas, saldo, alerta};
-    historial.unshift(r.log);
-    saveLocal();
+    r = calcularCobro(c, c.pagos, qIdx, qKey, accion);
+    if (r) { aplicarCobroEnMemoria(cid, r); saveLocal(); }
   }
-  toast(pagos[qIdx] ? `✅ Pago — ${c.nombre} $${c.pq.toLocaleString('es-MX')}` : `↩️ Revertido — ${c.nombre}`, pagos[qIdx]?'ok':'wrn');
-  if (!_undoing) { _lastPago = {cid, qIdx}; showUndo(c.nombre, pagos[qIdx]); }
-  renderCL();
-  renderDash();
+
+  if (!r) {
+    if (!opts.silencioso) {
+      toast(accion === 'PAGO'
+        ? `${c.nombre}: esa quincena ya estaba cobrada — no se cobró otra vez`
+        : `${c.nombre}: esa quincena ya no estaba pagada`, 'wrn');
+    }
+    return { ok:false, motivo:'sin_cambio' };
+  }
+
+  if (!opts.silencioso) {
+    const pend = estado === 'pendiente' ? ' (pendiente de subir)' : '';
+    toast(accion === 'PAGO'
+      ? `✅ Pago — ${c.nombre} $${c.pq.toLocaleString('es-MX')}${pend}`
+      : `↩️ Revertido — ${c.nombre}${pend}`, accion === 'PAGO' ? 'ok' : 'wrn');
+  }
+  if (!opts.sinDeshacer) { _lastPago = { cid, qIdx, accion, qKey }; showUndo(c.nombre, accion === 'PAGO'); }
+  return { ok:true, estado, accion };
 }
 
 /* ============================================================
@@ -376,10 +506,8 @@ function selReverso(cid, qIdx, el) {
 
 async function doReverso(cid, qIdx) {
   cm('m-reverso');
-  const c = clientes.find(x => x.id === cid); if (!c) return;
-  const pagos = c.pagos || Array(c.nq).fill(false);
-  if (!pagos[qIdx]) { toast('Esa quincena ya no está pagada', 'wrn'); return; }
-  _undoing = true;
-  try { await togglePago(cid, qIdx); } finally { _undoing = false; }
+  // La verificación "ya no está pagada" la hace registrarCobro con el dato
+  // más reciente (dentro de la transacción si hay red)
+  return registrarCobro(cid, qIdx, 'REVERSO', { sinDeshacer: true });
 }
 

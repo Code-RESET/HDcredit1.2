@@ -29,7 +29,9 @@ function calcRecargoPorCliente(c) {
   for (let i = c.pagadas; i < elapsed; i++) {
     const dueDate = getQDueDate(c.inicio, i, producto);
     if (!dueDate) continue;
-    const diasAtraso = Math.max(0, Math.floor((today - dueDate) / (1000 * 60 * 60 * 24)));
+    // Días de calendario desde el vencimiento: el día del vencimiento = 0
+    // (no atrasado), el día siguiente = 1 día de recargo, y así.
+    const diasAtraso = diasDeAtraso(dueDate, today);
     periodos.push({ idx: i + 1, dueDate, diasAtraso, recargo: diasAtraso * porDia });
   }
   return { periodos, total: periodos.reduce((a, p) => a + p.recargo, 0) };
@@ -221,7 +223,8 @@ document.addEventListener('visibilitychange', () => {
 ============================================================ */
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    document.querySelectorAll('.overlay.open').forEach(o => o.classList.remove('open'));
+    // El rescate no se puede cerrar con Escape (hay que decidir qué hacer)
+    document.querySelectorAll('.overlay.open:not([data-bloqueante])').forEach(o => o.classList.remove('open'));
   }
 });
 
@@ -230,10 +233,12 @@ document.addEventListener('keydown', e => {
 ============================================================ */
 window.addEventListener('unhandledrejection', e => {
   console.error('HD Crédit — promise rejection:', e.reason);
+  reportarError('Promesa sin manejar', e.reason);
   if (e.reason?.message) toast('Error inesperado: ' + e.reason.message, 'err');
 });
-window.onerror = (msg, src, line) => {
+window.onerror = (msg, src, line, col, err) => {
   console.error('HD Crédit — JS error:', msg, 'en línea', line);
+  reportarError('Error de JavaScript', err || new Error(String(msg)), { donde: (src || '').split('/').pop() + ':' + line });
 };
 
 /* ============================================================
@@ -274,6 +279,7 @@ function init(){
 
   initQSel();
   renderTF();
+  pintarAvisoErrores(); // errores guardados de sesiones anteriores
 
   // Pide almacenamiento persistente para reducir el riesgo de que el
   // navegador borre localStorage bajo presión de espacio.
@@ -288,32 +294,37 @@ function init(){
     document.getElementById('loader').classList.add('hide');
     setTimeout(()=>document.getElementById('loader').style.display='none',450);
 
-    if(!saved){
-      // No hay nada guardado en este dispositivo: usa la config
-      // incrustada por defecto en vez de pedirle al usuario que la
-      // pegue a mano cada vez.
-      localStorage.setItem('hd_fb', JSON.stringify(DEFAULT_FB_CONFIG));
-      loadFirebaseSDK(DEFAULT_FB_CONFIG);
-      return;
-    }
-    if(saved==='local'){
-      loadLocal();
-      return;
-    }
-    try{
-      const cfg=JSON.parse(saved);
-      loadFirebaseSDK(cfg);
-    }catch(e){
-      loadFirebaseSDK(DEFAULT_FB_CONFIG);
-    }
+    arrancarConexion(saved);
   },1600);
+}
+
+// Decide cómo conectar SIN arriesgar datos que solo existen en este teléfono.
+function arrancarConexion(saved){
+  let cfg = DEFAULT_FB_CONFIG;
+  if (saved && saved !== 'local') {
+    try { cfg = JSON.parse(saved); } catch(e) { cfg = DEFAULT_FB_CONFIG; }
+  }
+  // 1. Modo local elegido a mano: se respeta
+  if (saved === 'local' && localStorage.getItem('hd_local_manual') === '1') { loadLocal(); return; }
+  // 2. Modo local heredado (versiones anteriores lo guardaban solo al
+  //    fallar la red) o cambios hechos en modo local temporal: rescate
+  //    obligatorio antes de reconectar — si hay algo que rescatar.
+  const pendiente = localStorage.getItem('hd_rescate_pendiente') === '1';
+  if ((saved === 'local' || pendiente) && hayDatosLocales()) {
+    localStorage.setItem('hd_rescate_pendiente', '1');
+    iniciarRescate(cfg);
+    return;
+  }
+  // 3. Normal: conectar a la nube
+  if (!saved || saved === 'local') localStorage.setItem('hd_fb', JSON.stringify(cfg));
+  loadFirebaseSDK(cfg);
 }
 
 // Expose globals
 window.openNew=openNew; window.editC=editC; window.saveC=saveC;
 window.onProductoChange=onProductoChange;
 window.calcPQ=calcPQ; window.confirmDel=confirmDel;
-window.togglePago=togglePago; window.openEC=openEC; window.sendEC=sendEC;
+window.registrarCobro=registrarCobro; window.openEC=openEC; window.sendEC=sendEC;
 window.waCliente=waCliente; window.waAll=waAll;
 window.filterC=filterC; window.filterH=filterH;
 window.renderCL=renderCL; window.gv=gv; window.toggleSB=toggleSB;
@@ -325,5 +336,9 @@ window.switchMorososTab=switchMorososTab; window.renderMorosos=renderMorosos;
 window.openReporte=openReporte; window.sendReporte=sendReporte;
 window.openReverso=openReverso; window.selReverso=selReverso; window.doReverso=doReverso;
 window.cargarMasHistorial=cargarMasHistorial;
+window.abrirErrores=abrirErrores; window.limpiarErrores=limpiarErrores;
+window.rescateDescargar=rescateDescargar; window.rescateComparar=rescateComparar;
+window.rescateSubir=rescateSubir; window.rescateSeguirLocal=rescateSeguirLocal;
+window.rescateTerminar=rescateTerminar; window.reintentarConexion=reintentarConexion;
 
 init();

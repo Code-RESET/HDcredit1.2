@@ -12,7 +12,10 @@
 <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', async () => {
-      const reg = await navigator.serviceWorker.register('sw.js');
+      let reg;
+      try { reg = await navigator.serviceWorker.register('sw.js'); }
+      catch(e) { if (typeof reportarError === 'function') reportarError('Registrar service worker', e); return; }
+      if (!reg) return; // navegador/entorno que bloquea service workers
       // Si hay nueva versión esperando, activarla inmediatamente
       reg.addEventListener('updatefound', () => {
         const newSW = reg.installing;
@@ -247,6 +250,16 @@ tbody tr:last-child td{border-bottom:none}
 @keyframes blink{to{transform:scale(1.15);box-shadow:0 0 10px rgba(255,184,0,.4)}}
 
 /* UNDO BAR */
+.err-badge{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:6500;display:flex;align-items:center;gap:6px;background:var(--danger);color:#fff;border:0;border-radius:999px;padding:9px 14px;font-size:.8rem;font-weight:700;box-shadow:var(--shadow);cursor:pointer}
+.err-badge[hidden]{display:none}
+.banner-sinsync{position:fixed;left:0;right:0;top:0;z-index:6400;display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;background:var(--danger);color:#fff;font-size:.8rem;font-weight:700;padding:calc(6px + env(safe-area-inset-top,0px)) 16px 6px}
+.banner-sinsync[hidden]{display:none}
+.rsc-sec{border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
+.rsc-sec h4{font-size:.82rem;margin-bottom:4px}
+.rsc-sec ul{margin:4px 0 0 18px;color:var(--muted);font-size:.78rem}
+.err-item{border:1px solid var(--border2);border-left:3px solid var(--danger);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
+.err-meta{font-size:.72rem;color:var(--muted);font-family:'DM Mono',monospace}
+.err-msg{font-size:.84rem;margin-top:3px;overflow-wrap:anywhere}
 #undo-bar{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid rgba(255,184,0,.3);border-radius:var(--radius);padding:10px 14px;margin:0 18px 10px;font-size:.84rem;position:relative;overflow:hidden}
 #undo-bar .undo-msg{flex:1;font-size:.83rem}
 .undo-btn{background:rgba(255,184,0,.12);color:var(--warn);border:1px solid rgba(255,184,0,.3);padding:6px 13px;border-radius:8px;font-size:.78rem;font-weight:700;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px;font-family:inherit}
@@ -301,6 +314,43 @@ tbody tr:last-child td{border-bottom:none}
 
 <!-- TOASTS -->
 <div id="toasts"></div>
+
+<!-- Aviso fijo: trabajando sin sincronizar (modo local por fallo o rescate pendiente) -->
+<div id="banner-sinsync" class="banner-sinsync" hidden role="status">
+  <span id="banner-sinsync-txt">⚠️ SIN SINCRONIZAR</span>
+  <button class="btn btn-s btn-sm" id="banner-reintentar" onclick="reintentarConexion()"><i class="fas fa-sync"></i> Reintentar</button>
+</div>
+
+<!-- RESCATE: datos que solo existen en este teléfono -->
+<div class="overlay" id="m-rescate" data-bloqueante role="dialog" aria-modal="true" aria-label="Rescate de datos locales">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-life-ring" style="color:var(--warn);margin-right:8px"></i>Datos guardados solo en este teléfono</div></div>
+    <div id="resc-paso1">
+      <p id="resc-resumen" style="font-size:.86rem;margin-bottom:14px;white-space:pre-line"></p>
+      <button class="btn btn-p" id="resc-descargar" onclick="rescateDescargar()"><i class="fas fa-download"></i> 1. Descargar respaldo JSON</button>
+      <label style="display:flex;gap:8px;align-items:center;margin:14px 0;font-size:.85rem"><input type="checkbox" id="resc-check"> 2. Ya guardé el archivo de respaldo</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-p" id="resc-comparar" onclick="rescateComparar()" disabled><i class="fas fa-cloud"></i> 3. Conectar y comparar con la nube</button>
+        <button class="btn btn-s" id="resc-local" onclick="rescateSeguirLocal()"><i class="fas fa-mobile-alt"></i> Seguir sin conectar</button>
+      </div>
+    </div>
+    <div id="resc-paso2" hidden>
+      <div id="resc-comparacion" style="font-size:.84rem"></div>
+      <p id="resc-error" style="color:var(--danger);font-size:.82rem;margin-top:8px" hidden></p>
+      <label style="display:flex;gap:8px;align-items:center;margin:14px 0;font-size:.85rem"><input type="checkbox" id="resc-check2"> Revisé la comparación</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-p" id="resc-subir" onclick="rescateSubir()" disabled><i class="fas fa-cloud-upload-alt"></i> Subir faltantes a la nube</button>
+        <button class="btn btn-s" id="resc-sinsubir" onclick="rescateTerminar()" disabled>Conectar sin subir nada</button>
+        <button class="btn btn-s" id="resc-local2" onclick="rescateSeguirLocal()"><i class="fas fa-mobile-alt"></i> Seguir sin conectar</button>
+      </div>
+    </div>
+    <div id="resc-paso3" hidden>
+      <div id="resc-resultado" style="font-size:.86rem;white-space:pre-line;margin-bottom:14px"></div>
+      <button class="btn btn-p" id="resc-terminar" onclick="rescateTerminar()"><i class="fas fa-check"></i> Terminar y sincronizar</button>
+    </div>
+    <p style="font-size:.72rem;color:var(--muted);margin-top:14px">La copia de rescate se queda guardada en este teléfono; nada se borra automáticamente.</p>
+  </div>
+</div>
 
 <!-- FIREBASE CONFIG -->
 <div id="fb-cfg" style="display:none">
@@ -367,6 +417,8 @@ tbody tr:last-child td{border-bottom:none}
     </div>
   </div>
 </nav>
+<!-- Aviso fijo de errores silenciosos (fuera del sidebar para que siempre se vea) -->
+<button id="err-badge" class="err-badge" onclick="abrirErrores()" hidden title="Ver errores registrados"><i class="fas fa-bug"></i> <span id="err-count">0</span> errores</button>
 
 <!-- MAIN -->
 <div id="main">
@@ -611,13 +663,13 @@ tbody tr:last-child td{border-bottom:none}
       </div>
       <div class="fg"><label id="lbl-pq">Pago Quincenal</label><input class="fc" id="f-pq" readonly placeholder="Calculado" style="color:var(--accent)"></div>
       <div class="fg"><label>Fecha Inicio</label><input class="fc" type="date" id="f-ini"></div>
-      <div class="fg" id="fg-pagadas"><label id="lbl-pag">Q ya Pagadas</label><input class="fc" type="number" id="f-pag" value="0" min="0"></div>
+      <div class="fg" id="fg-pagadas"><label id="lbl-pag">Q ya Pagadas</label><input class="fc" type="number" id="f-pag" value="0" min="0" step="1" inputmode="numeric"></div>
       <div class="fg full"><label>WhatsApp (10 dígitos)</label><input class="fc" id="f-tel" placeholder="5512345678"></div>
       <div class="fg full"><label>Notas</label><textarea class="fc" id="f-notas" rows="2" placeholder="Observaciones..."></textarea></div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;flex-wrap:wrap">
       <button class="btn btn-s" onclick="cm('m-cliente')">Cancelar</button>
-      <button class="btn btn-p" onclick="saveC()"><i class="fas fa-save"></i> Guardar</button>
+      <button class="btn btn-p" id="btn-save-c" onclick="saveC()"><i class="fas fa-save"></i> Guardar</button>
     </div>
   </div>
 </div>
@@ -630,6 +682,31 @@ tbody tr:last-child td{border-bottom:none}
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button class="btn btn-s" onclick="cm('m-confirm')">Cancelar</button>
       <button class="btn btn-d" id="conf-ok"><i class="fas fa-trash"></i> Eliminar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirmar restauración de respaldo -->
+<div class="overlay" id="m-restaurar" role="dialog" aria-modal="true" aria-label="Confirmar restauración">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-upload" style="color:var(--warn);margin-right:8px"></i>Restaurar respaldo</div><button class="btn-x" onclick="cm('m-restaurar')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
+    <p style="font-size:.87rem;margin-bottom:20px;white-space:pre-line" id="rest-msg"></p>
+    <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-s" id="rest-cancel" onclick="cm('m-restaurar')">Cancelar</button>
+      <button class="btn btn-d" id="rest-ok"><i class="fas fa-upload"></i> Sí, restaurar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Errores registrados -->
+<div class="overlay" id="m-errores" role="dialog" aria-modal="true" aria-label="Errores registrados">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-bug" style="color:var(--danger);margin-right:8px"></i>Errores registrados</div><button class="btn-x" onclick="cm('m-errores')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
+    <p style="color:var(--muted);font-size:.8rem;margin-bottom:12px">Se guardan solo en este dispositivo (últimos 50). Toma captura si necesitas reportarlos.</p>
+    <div id="err-body"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;flex-wrap:wrap">
+      <button class="btn btn-s" onclick="limpiarErrores()"><i class="fas fa-broom"></i> Limpiar</button>
+      <button class="btn btn-s" onclick="cm('m-errores')">Cerrar</button>
     </div>
   </div>
 </div>
@@ -684,6 +761,7 @@ tbody tr:last-child td{border-bottom:none}
 <script src="js/negocio.js"></script>
 <script src="js/ui.js"></script>
 <script src="js/export.js"></script>
+<script src="js/rescate.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

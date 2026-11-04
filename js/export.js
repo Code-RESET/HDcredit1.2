@@ -198,39 +198,108 @@ function doImportJSON() {
     const reader = new FileReader();
     reader.onload = ev => {
       try {
-        const payload = JSON.parse(ev.target.result);
-        if (!payload.clientes || !Array.isArray(payload.clientes) || !payload.clientes.length) {
-          toast('Archivo inválido o sin clientes', 'err'); return;
-        }
-        // Validar estructura de cada cliente
-        const validos = payload.clientes.filter(c =>
-          c && typeof c === 'object'
-          && typeof c.nombre === 'string' && c.nombre.trim()
-          && Number.isFinite(c.nq) && c.nq > 0
-          && Number.isFinite(c.monto) && c.monto > 0
-          && Number.isFinite(c.pagadas)
-        );
-        const omitidos = payload.clientes.length - validos.length;
-        if (!validos.length) { toast('Archivo inválido: sin registros con estructura correcta', 'err'); return; }
-        const tsLabel = payload.ts ? new Date(payload.ts).toLocaleDateString('es-MX') : 'fecha desconocida';
-        const msg = `¿Importar ${validos.length} clientes del respaldo del ${tsLabel}?\n\nEsto reemplazará los datos actuales.`
-          + (omitidos ? `\n\n⚠️ Se omitirán ${omitidos} registros con datos inválidos.` : '');
-        if (!confirm(msg)) return;
-        autoBackup();
-        clientes = validos;
-        historial = Array.isArray(payload.historial) ? payload.historial : [];
-        historial.sort((a, b) => new Date(b.ts) - new Date(a.ts));
-        syncAlertas();
-        saveLocal();
-        refresh();
-        if (omitidos) toast(`${validos.length} clientes restaurados · ${omitidos} omitidos por datos inválidos`, 'wrn');
-        else toast(`${validos.length} clientes restaurados ✅`, 'ok');
+        prepararRestauracion(JSON.parse(ev.target.result));
       } catch(err) {
+        reportarError('Leer respaldo JSON', err);
         toast('Error al leer el archivo: ' + err.message, 'err');
       }
     };
     reader.readAsText(file);
   };
   input.click();
+}
+
+const ID_VALIDO = /^[\w-]{1,120}$/;
+function clienteImportadoValido(c) {
+  return !!(c && typeof c === 'object'
+    && typeof c.id === 'string' && ID_VALIDO.test(c.id)
+    && typeof c.nombre === 'string' && c.nombre.trim()
+    && Number.isFinite(c.nq) && c.nq > 0
+    && Number.isFinite(c.monto) && c.monto > 0
+    && Number.isFinite(c.pq) && c.pq >= 0
+    && Number.isFinite(c.pagadas) && c.pagadas >= 0 && c.pagadas <= c.nq
+    && (c.saldo === undefined || Number.isFinite(c.saldo))
+    && (c.pagos === undefined || Array.isArray(c.pagos)));
+}
+
+// Valida el archivo y muestra la confirmación. No escribe nada todavía.
+function prepararRestauracion(payload) {
+  if (!payload || !Array.isArray(payload.clientes) || !payload.clientes.length) {
+    toast('Archivo inválido o sin clientes', 'err'); return null;
+  }
+  const validos = payload.clientes.filter(clienteImportadoValido)
+    .map(c => ({ ...c, createdAt: c.createdAt || new Date().toISOString() }));
+  const omitidos = payload.clientes.length - validos.length;
+  if (!validos.length) { toast('Archivo inválido: sin registros con estructura correcta', 'err'); return null; }
+  const hist = (Array.isArray(payload.historial) ? payload.historial : [])
+    .filter(h => h && typeof h === 'object' && typeof h.clienteId === 'string')
+    .map((h, i) => ({ ...h, id: (typeof h.id === 'string' && ID_VALIDO.test(h.id)) ? h.id : 'h_rest_' + Date.now() + '_' + i }));
+  const tsLabel = payload.ts ? new Date(payload.ts).toLocaleDateString('es-MX') : 'fecha desconocida';
+
+  const destino = USE_FB
+    ? 'Se guardará EN LA NUBE y lo verán TODOS los dispositivos.\nLos acreditados que no estén en el respaldo se eliminarán de la nube.\nEl historial del respaldo se agrega; no se borra historial existente.'
+    : 'Se guardará en este dispositivo y reemplazará los datos actuales.';
+  document.getElementById('rest-msg').textContent =
+    `¿Restaurar ${validos.length} acreditados y ${hist.length} movimientos del respaldo del ${tsLabel}?\n\n${destino}`
+    + (omitidos ? `\n\n⚠️ Se omitirán ${omitidos} registros con datos inválidos.` : '');
+  const ok = document.getElementById('rest-ok');
+  ok.disabled = false;
+  ok.onclick = async () => {
+    ok.disabled = true;
+    const exito = await restaurarRespaldo(validos, hist, omitidos);
+    ok.disabled = false;
+    if (exito) cm('m-restaurar');
+  };
+  om('m-restaurar');
+  return { validos, hist, omitidos };
+}
+
+function conTiempoLimite(promesa, ms, mensaje) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(mensaje)), ms);
+    promesa.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+  });
+}
+
+// Escribe el respaldo. En modo Firebase solo muestra éxito después de que
+// el servidor confirmó TODOS los lotes.
+async function restaurarRespaldo(validos, hist, omitidos = 0) {
+  autoBackup(); // copia de lo que había, en este dispositivo
+  if (!USE_FB) {
+    clientes = validos;
+    historial = hist.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts));
+    syncAlertas();
+    saveLocal();
+    refresh();
+  } else {
+    let lotesOk = 0, totalLotes = 0;
+    try {
+      if (!navigator.onLine) throw new Error('Sin conexión: restaurar necesita internet para confirmar con la nube');
+      toast('Restaurando en la nube…', 'wa');
+      const actuales = await conTiempoLimite(CLI().get({ source: 'server' }), 30000, 'La nube no respondió al leer los acreditados actuales');
+      const idsRespaldo = new Set(validos.map(c => c.id));
+      // Orden: primero se escribe lo del respaldo y al final se borra lo que
+      // sobra — si algo falla a la mitad, nunca queda menos información.
+      const ops = [];
+      validos.forEach(c => ops.push(b => b.set(CLI().doc(c.id), { ...c, alerta: calcAlerta(c) })));
+      hist.forEach(h => ops.push(b => b.set(HIST().doc(h.id), h)));
+      actuales.docs.forEach(d => { if (!idsRespaldo.has(d.id)) ops.push(b => b.delete(d.ref)); });
+      const TAM = 450; // límite de Firestore: 500 operaciones por lote
+      totalLotes = Math.ceil(ops.length / TAM);
+      for (let i = 0; i < ops.length; i += TAM) {
+        const batch = DB.batch();
+        ops.slice(i, i + TAM).forEach(f => f(batch));
+        await conTiempoLimite(batch.commit(), 60000, 'La nube no confirmó la escritura a tiempo');
+        lotesOk++;
+      }
+    } catch(e) {
+      reportarError('Restaurar respaldo en la nube', e, { lotes: `${lotesOk}/${totalLotes}` });
+      toast(`❌ La restauración NO se completó: ${e.message}` + (totalLotes ? ` (lotes confirmados: ${lotesOk} de ${totalLotes})` : ''), 'err');
+      return false;
+    }
+  }
+  if (omitidos) toast(`${validos.length} acreditados restaurados · ${omitidos} omitidos por datos inválidos`, 'wrn');
+  else toast(`${validos.length} acreditados restaurados ✅`, 'ok');
+  return true;
 }
 

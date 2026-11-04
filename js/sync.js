@@ -20,13 +20,34 @@ function connectFirebase() {
     toast('Error: ' + e.message, 'err'); return;
   }
   localStorage.setItem('hd_fb', JSON.stringify(cfg));
+  // Si este teléfono venía trabajando en modo local y tiene datos, NO se
+  // conecta directo (la nube reemplazaría lo local): pasa por el rescate.
+  if (!USE_FB && hayDatosLocales()) {
+    document.getElementById('fb-cfg').style.display = 'none';
+    localStorage.setItem('hd_rescate_pendiente', '1');
+    iniciarRescate(cfg);
+    return;
+  }
   loadFirebaseSDK(cfg);
 }
 
-function loadFirebaseSDK(cfg) {
+// opts.rescate: conexión para el rescate — no arranca la sincronización y,
+// si falla, no cambia de modo (el rescate decide). Devuelve true/false.
+function loadFirebaseSDK(cfg, opts = {}) {
+  return new Promise(resolve => _loadFirebaseSDK(cfg, opts, resolve));
+}
+function _loadFirebaseSDK(cfg, opts, resolve) {
+  const fallar = (msg) => {
+    reportarError('Conectar Firebase', new Error(msg));
+    if (!opts.rescate) {
+      toast(msg + ' Se trabaja en este dispositivo hasta reconectar.', 'err');
+      modoLocalTemporal(msg);
+    }
+    resolve(false);
+  };
   // No reinyectar los <script> del SDK si ya están cargados (evita duplicados
   // al reconectar Firebase más de una vez en la misma sesión)
-  if (window.firebase && typeof firebase.firestore === 'function') { initFB(cfg); return; }
+  if (window.firebase && typeof firebase.firestore === 'function') { initFB(cfg, opts).then(resolve); return; }
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -41,12 +62,12 @@ function loadFirebaseSDK(cfg) {
 
   let settled = false;
   // Si la red va lenta o se traba, no dejar la app esperando indefinidamente:
-  // a los 12s se cae a modo local en vez de quedarse en blanco
+  // a los 12s se trabaja en local SOLO por esta sesión (no se guarda como
+  // modo permanente: el siguiente arranque vuelve a intentar la nube)
   const timeoutId = setTimeout(() => {
     if (settled) return;
     settled = true;
-    toast('Firebase tardó demasiado en responder. Usando modo local.', 'err');
-    goLocal();
+    fallar('Firebase tardó demasiado en responder.');
   }, 12000);
 
   // Se vuelve a cargar el SDK de Auth (además de app + firestore), pero SOLO
@@ -60,14 +81,13 @@ function loadFirebaseSDK(cfg) {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
-      initFB(cfg);
+      initFB(cfg, opts).then(resolve);
     })
     .catch(() => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
-      toast('No se pudo cargar Firebase SDK. Usando modo local.', 'err');
-      goLocal();
+      fallar('No se pudo cargar Firebase SDK.');
     });
 }
 
@@ -99,7 +119,7 @@ function authAnonimo() {
   });
 }
 
-async function initFB(cfg) {
+async function initFB(cfg, opts = {}) {
   try {
     if (!firebase.apps.length) firebase.initializeApp(cfg);
     DB = firebase.firestore();
@@ -110,18 +130,28 @@ async function initFB(cfg) {
     // copia local en el dispositivo) y los cobros que se hagan sin conexión
     // se guardan en cola y se suben solos en cuanto vuelve la señal
     DB.enablePersistence({synchronizeTabs: true}).catch(e => {
-      console.warn('HD Crédit — persistencia offline no disponible:', e.code);
+      // Sin persistencia, un cobro hecho sin señal se pierde al cerrar la app
+      reportarError('Persistencia offline no disponible', e);
     });
     // El estado real (sincronizado / local / subiendo) lo decide startFBSync()
     // a partir de snap.metadata, que refleja la conexión real con Firestore
     // (más confiable que navigator.onLine, que solo mira la red del dispositivo)
-    setSyncLbl(navigator.onLine ? 'ok' : 'local');
     await authAnonimo();
+    // En rescate todavía NO se sincroniza: la sincronización reemplazaría
+    // los datos locales antes de compararlos
+    if (opts.rescate) return true;
+    _modoLocalTemporal = false;
+    const banner = document.getElementById('banner-sinsync');
+    if (banner) banner.hidden = true;
+    setSyncLbl(navigator.onLine ? 'ok' : 'local');
     startFBSync();
+    return true;
   } catch(e) {
-    console.error(e);
+    reportarError('Iniciar Firebase', e);
     toast('Error Firebase: ' + e.message, 'err');
-    goLocal();
+    USE_FB = false;
+    if (!opts.rescate) modoLocalTemporal('Error al iniciar Firebase');
+    return false;
   }
 }
 
@@ -132,7 +162,8 @@ function HIST() { return DB.collection('usuarios').doc(CURRENT_UID).collection('
 function setSyncLbl(estado) {
   const el = document.getElementById('sync-lbl');
   if (!el) return;
-  if (estado === 'local') { el.textContent = '🟡 Sin internet — guardando en el dispositivo'; el.style.color = 'var(--warn)'; }
+  if (estado === 'sin-sync') { el.textContent = '🔴 SIN SINCRONIZAR — solo en este teléfono'; el.style.color = 'var(--danger)'; }
+  else if (estado === 'local') { el.textContent = '🟡 Sin internet — guardando en el dispositivo'; el.style.color = 'var(--warn)'; }
   else if (estado === 'pendiente') { el.textContent = '🟡 Cambios guardados — subiendo…'; el.style.color = 'var(--warn)'; }
   else if (estado === 'error') { el.textContent = '🔴 Desconectado — reintentando…'; el.style.color = 'var(--danger)'; }
   else { el.textContent = '🟢 Sincronizado'; el.style.color = 'var(--accent)'; }
@@ -159,7 +190,7 @@ function startFBSync() {
     else if (snap.metadata.hasPendingWrites) setSyncLbl('pendiente');
     else setSyncLbl('ok');
   }, err => {
-    console.error('HD Crédit — error de sincronización (clientes):', err);
+    reportarError('Sincronización de acreditados', err);
     setSyncLbl('error');
     if (Date.now() - _errToastAt > 30000) { _errToastAt = Date.now(); toast('Error de sincronización: ' + err.message, 'err'); }
   });
@@ -178,15 +209,48 @@ function startFBSync() {
     renderCL();
     renderDash();
   }, err => {
-    console.error('HD Crédit — error de sincronización (historial):', err);
+    reportarError('Sincronización de historial', err);
     if (Date.now() - _errToastAt > 30000) { _errToastAt = Date.now(); toast('Error de sincronización: ' + err.message, 'err'); }
   });
 }
 
+// Modo local ELEGIDO por el usuario (botón "Solo local"): se guarda como
+// permanente y se marca como manual para distinguirlo de un fallo.
 function goLocal() {
   localStorage.setItem('hd_fb', 'local');
+  localStorage.setItem('hd_local_manual', '1');
   document.getElementById('fb-cfg').style.display = 'none';
   loadLocal();
+}
+
+// Modo local por FALLO (red lenta, SDK que no carga…): solo por esta
+// sesión. No se guarda 'local'; el siguiente arranque reintenta la nube.
+// Lo que se cobre mientras tanto queda en el teléfono y, al reconectar,
+// pasa por el rescate (ver rescate.js) en vez de ser reemplazado.
+let _modoLocalTemporal = false;
+function modoLocalTemporal(motivo) {
+  USE_FB = false;
+  _modoLocalTemporal = true;
+  document.getElementById('fb-cfg').style.display = 'none';
+  loadLocal();
+  setSyncLbl('sin-sync');
+  mostrarBannerSinSync(motivo);
+}
+
+function mostrarBannerSinSync(motivo) {
+  const b = document.getElementById('banner-sinsync');
+  if (!b) return;
+  const t = document.getElementById('banner-sinsync-txt');
+  if (t) t.textContent = '⚠️ SIN SINCRONIZAR — lo que hagas se guarda solo en este teléfono' + (motivo ? ' (' + motivo + ')' : '');
+  b.hidden = false;
+}
+
+function hayDatosLocales() {
+  try {
+    const c = JSON.parse(localStorage.getItem('hd_c') || '[]');
+    const h = JSON.parse(localStorage.getItem('hd_h') || '[]');
+    return (Array.isArray(c) && c.length > 0) || (Array.isArray(h) && h.length > 0);
+  } catch(e) { return true; } // ante la duda, proteger
 }
 
 /* ============================================================
@@ -250,7 +314,12 @@ function syncAlertas() {
     if (alerta !== (c.alerta || '')) { changed = true; return {...c, alerta}; }
     return c;
   });
-  if (changed) saveLocal();
+  // Recalcular alertas no es un cambio del usuario: se guarda sin marcar
+  // "rescate pendiente"
+  if (changed) {
+    try { localStorage.setItem('hd_c', JSON.stringify(clientes)); }
+    catch(e) { reportarError('Guardar alertas en el dispositivo', e); }
+  }
 }
 
 function loadLocal() {
@@ -269,7 +338,7 @@ function loadLocal() {
           toast('Datos recuperados del respaldo automático (' + new Date(bk.ts).toLocaleDateString() + ') ✅', 'ok');
           break;
         }
-      } catch(e) { /* respaldo corrupto, ignorar */ }
+      } catch(e) { reportarError('Leer respaldo automático ' + bkKey, e); }
     }
   }
   syncAlertas();
@@ -280,7 +349,11 @@ function saveLocal() {
   try {
     localStorage.setItem('hd_c', JSON.stringify(clientes));
     localStorage.setItem('hd_h', JSON.stringify(historial));
+    // Un cambio hecho en modo local temporal debe rescatarse antes de
+    // volver a sincronizar (si no, la nube lo reemplazaría)
+    if (_modoLocalTemporal) localStorage.setItem('hd_rescate_pendiente', '1');
   } catch(e) {
+    reportarError('Guardar en el dispositivo', e);
     toast('⚠️ Almacenamiento lleno — exporta un respaldo JSON ahora para no perder datos', 'err');
   }
 }

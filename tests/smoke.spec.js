@@ -11,7 +11,8 @@ const { test, expect } = require('@playwright/test');
 
 test.beforeEach(async ({ page }) => {
   // Fuerza modo local: las pruebas no dependen de un Firebase real
-  await page.addInitScript(() => localStorage.setItem('hd_fb', 'local'));
+  // (modo local elegido a mano: si no, la app intentaría reconectar a la nube)
+  await page.addInitScript(() => { localStorage.setItem('hd_fb', 'local'); localStorage.setItem('hd_local_manual', '1'); });
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   page.errors = errors;
