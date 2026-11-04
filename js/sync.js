@@ -180,15 +180,27 @@ function startFBSync() {
     // Se confía siempre en el snapshot (incluye listas vacías reales, p.ej.
     // al eliminar el último acreditado) — antes se descartaba ese caso y la
     // pantalla quedaba con datos obsoletos
-    clientes = snap.docs.map(d => ({id: d.id, ...d.data()}));
+    // Los cobros en cola (hechos sin red) se superponen: la pantalla no los
+    // "olvida" mientras no suben
+    clientes = aplicarColaSobre(snap.docs.map(d => ({id: d.id, ...d.data()})));
     syncAlertas();
-    localStorage.setItem('hd_c', JSON.stringify(clientes));
+    // Con el almacenamiento lleno, setItem lanza: se registra pero la
+    // pantalla se actualiza igual (antes el error cortaba el refresh)
+    try { localStorage.setItem('hd_c', JSON.stringify(clientes)); }
+    catch(e) { reportarError('Guardar copia local de acreditados', e); }
     refresh();
     // metadata.fromCache: se está mostrando la copia local (sin red);
     // metadata.hasPendingWrites: hay cobros hechos aquí que aún no suben
+    const enCola = leerCola().length;
     if (snap.metadata.fromCache) setSyncLbl('local');
-    else if (snap.metadata.hasPendingWrites) setSyncLbl('pendiente');
+    else if (snap.metadata.hasPendingWrites || enCola) setSyncLbl('pendiente');
     else setSyncLbl('ok');
+    if (!snap.metadata.fromCache) {
+      // Momento de la última copia confirmada por la nube: el rescate lo usa
+      // para saber si un acreditado que falta fue borrado en otro teléfono
+      try { localStorage.setItem('hd_ultima_sync', new Date().toISOString()); } catch(e) {}
+      if (enCola) procesarColaCobros();
+    }
   }, err => {
     reportarError('Sincronización de acreditados', err);
     setSyncLbl('error');
@@ -257,8 +269,11 @@ function hayDatosLocales() {
    PAGINACIÓN DE HISTORIAL
 ============================================================ */
 function mergeHistorial() {
-  historial = _histReciente.concat(_histAntiguo);
-  localStorage.setItem('hd_h', JSON.stringify(historial));
+  const ids = new Set(_histReciente.map(h => h.id).concat(_histAntiguo.map(h => h.id)));
+  const pendientes = movimientosEnCola().filter(h => !ids.has(h.id)).reverse();
+  historial = pendientes.concat(_histReciente, _histAntiguo);
+  try { localStorage.setItem('hd_h', JSON.stringify(historial)); }
+  catch(e) { reportarError('Guardar copia local de historial', e); }
 }
 
 // Trae la siguiente página de historial viejo (fuera de la ventana en vivo).

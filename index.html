@@ -704,6 +704,10 @@ tbody tr:last-child td{border-bottom:none}
     <div class="modal-hd"><div class="modal-title"><i class="fas fa-bug" style="color:var(--danger);margin-right:8px"></i>Errores registrados</div><button class="btn-x" onclick="cm('m-errores')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
     <p style="color:var(--muted);font-size:.8rem;margin-bottom:12px">Se guardan solo en este dispositivo (últimos 50). Toma captura si necesitas reportarlos.</p>
     <div id="err-body"></div>
+    <div class="rsc-sec" style="margin-top:12px">
+      <p id="esp-info" style="font-size:.78rem;color:var(--muted)"></p>
+      <button class="btn btn-s btn-sm" id="esp-borrar" onclick="borrarCopiasDescargadas()" hidden style="margin-top:6px"></button>
+    </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;flex-wrap:wrap">
       <button class="btn btn-s" onclick="limpiarErrores()"><i class="fas fa-broom"></i> Limpiar</button>
       <button class="btn btn-s" onclick="cm('m-errores')">Cerrar</button>

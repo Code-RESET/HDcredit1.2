@@ -8,7 +8,7 @@ function doExport() {
   const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));
-  a.download = 'HDCredit_' + new Date().toISOString().split('T')[0] + '.csv';
+  a.download = 'HDCredit_' + fechaLocalISO() + '.csv';
   a.click();
   toast('Exportado CSV ✅', 'ok');
 }
@@ -70,7 +70,7 @@ async function _generateXLSX() {
     XLSX.utils.book_append_sheet(wb, ws2, 'Historial');
   }
 
-  const fname = 'HDCredit_' + new Date().toISOString().split('T')[0] + '.xlsx';
+  const fname = 'HDCredit_' + fechaLocalISO() + '.xlsx';
   XLSX.writeFile(wb, fname);
   toast('Excel descargado ✅', 'ok');
 }
@@ -183,7 +183,7 @@ async function doExportJSON() {
   const payload = { clientes, historial: historialCompleto, ts: new Date().toISOString(), v: '2.1' };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'}));
-  a.download = 'HDCredit_respaldo_' + new Date().toISOString().split('T')[0] + '.json';
+  a.download = 'HDCredit_respaldo_' + fechaLocalISO() + '.json';
   a.click();
   toast('Respaldo JSON descargado ✅', 'ok');
 }
@@ -232,7 +232,10 @@ function prepararRestauracion(payload) {
   const omitidos = payload.clientes.length - validos.length;
   if (!validos.length) { toast('Archivo inválido: sin registros con estructura correcta', 'err'); return null; }
   const hist = (Array.isArray(payload.historial) ? payload.historial : [])
-    .filter(h => h && typeof h === 'object' && typeof h.clienteId === 'string')
+    .filter(h => h && typeof h === 'object' && typeof h.clienteId === 'string'
+      && (h.qIndex === undefined || h.qIndex === null || Number.isInteger(h.qIndex))
+      && ['PAGO', 'REVERSO', 'AJUSTE'].includes(h.accion)
+      && (h.monto === undefined || Number.isFinite(h.monto)))
     .map((h, i) => ({ ...h, id: (typeof h.id === 'string' && ID_VALIDO.test(h.id)) ? h.id : 'h_rest_' + Date.now() + '_' + i }));
   const tsLabel = payload.ts ? new Date(payload.ts).toLocaleDateString('es-MX') : 'fecha desconocida';
 
@@ -256,7 +259,7 @@ function prepararRestauracion(payload) {
 
 function conTiempoLimite(promesa, ms, mensaje) {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(mensaje)), ms);
+    const t = setTimeout(() => { const e = new Error(mensaje); e.code = 'hd/timeout'; reject(e); }, ms);
     promesa.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
   });
 }

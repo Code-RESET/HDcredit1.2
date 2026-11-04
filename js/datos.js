@@ -51,6 +51,12 @@ let _histCursor = null, _histPaginando = false, _histHayMas = true, _histCargand
    (localStorage 'hd_err', últimos 50) y aparece un aviso rojo fijo con el
    conteo; al tocarlo se ve la lista. No se envía nada a la nube.
 ============================================================ */
+// Fecha de HOY en la zona del teléfono (AAAA-MM-DD). No usar
+// toISOString(): da la fecha UTC y en México, de noche, sale el día siguiente.
+function fechaLocalISO(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 const MAX_ERRORES = 50;
 let _errores = [];
 try { _errores = JSON.parse(localStorage.getItem('hd_err') || '[]'); if (!Array.isArray(_errores)) _errores = []; }
@@ -85,6 +91,7 @@ function abrirErrores() {
         <div class="err-msg">${esc(r.mensaje)}</div>
       </div>`).join('')
     : '<p style="color:var(--muted)">Sin errores registrados ✅</p>';
+  if (typeof pintarEspacio === 'function') pintarEspacio();
   om('m-errores');
 }
 

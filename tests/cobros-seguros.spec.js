@@ -83,6 +83,8 @@ function firestoreFalsoInit() {
       runTransaction: async fn => {
         log.transacciones++;
         if (ctl.tx === 'fail') { const e = new Error('unavailable (simulado)'); e.code = 'unavailable'; throw e; }
+        if (ctl.tx === 'denied') { const e = new Error('permiso denegado (simulado)'); e.code = 'permission-denied'; throw e; }
+        if (ctl.tx === 'hang') return new Promise(() => {});
         const ops = [];
         const tx = {
           get: async ref => snapDoc(ref.path),
@@ -231,36 +233,186 @@ test.describe('2. acreditado + historial en una sola operación', () => {
     expect(r.commits[0].map(o => o.path.split('/')[2])).toEqual(['clientes', 'historial']);
   });
 
-  test('sin conexión: un solo lote (cliente + historial), sin trabar la pantalla', async ({ page }) => {
+  test('sin conexión: queda en cola sin escribir; al volver la red sube en UNA transacción', async ({ page }) => {
     await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
     const r = await page.evaluate(async () => {
-      window.__fs.ctl.commit = 'hang'; // el servidor nunca confirma (sin señal)
       const t0 = Date.now();
       const res = await registrarCobro('c_prueba_1', 0, 'PAGO');
-      return { res, ms: Date.now() - t0, commits: window.__fs.log.commits, tx: window.__fs.log.transacciones,
+      return { res, ms: Date.now() - t0, commits: window.__fs.log.commits.length, cola: leerCola().length,
                pagadas: clientes[0].pagadas, hist: historial.filter(h => h.clienteId === 'c_prueba_1').length };
     });
     expect(r.res).toMatchObject({ ok: true, estado: 'pendiente' });
-    expect(r.tx).toBe(0);
-    expect(r.commits).toHaveLength(1);                  // UNA operación…
-    expect(r.commits[0]).toHaveLength(2);               // …con las dos escrituras
-    expect(r.commits[0].map(o => o.path.split('/')[2])).toEqual(['clientes', 'historial']);
-    expect(r.pagadas).toBe(1);
-    expect(r.hist).toBe(1);                             // el checklist ya lo ve cobrado
-    expect(r.ms).toBeLessThan(6000);
+    expect(r.commits).toBe(0);                          // sin red no se escribe `pagos` completo
+    expect(r.cola).toBe(1);
+    expect(r.pagadas).toBe(1);                          // la pantalla ya lo ve cobrado
+    expect(r.hist).toBe(1);
+    expect(r.ms).toBeLessThan(2000);
     await expect(page.locator('#toasts')).toContainText('pendiente de subir');
+    const s = await page.evaluate(async () => {
+      window.__online = true; await procesarColaCobros();
+      return { commits: window.__fs.log.commits, cola: leerCola().length };
+    });
+    expect(s.cola).toBe(0);
+    expect(s.commits).toHaveLength(1);
+    expect(s.commits[0].map(o => o.path.split('/')[2])).toEqual(['clientes', 'historial']);
   });
 
-  test('si la transacción falla con red, el respaldo también es un solo lote', async ({ page }) => {
+  test('si la transacción falla por RED, el cobro va a la cola; por otro error, se muestra y no se registra', async ({ page }) => {
     await modoFirebaseFalso(page, { online: true, cliente: CLIENTE });
     const r = await page.evaluate(async () => {
       window.__fs.ctl.tx = 'fail';
-      const res = await registrarCobro('c_prueba_1', 0, 'PAGO');
-      return { res, commits: window.__fs.log.commits };
+      const a = await registrarCobro('c_prueba_1', 0, 'PAGO');
+      const colaA = leerCola().length;
+      window.__fs.ctl.tx = 'denied';
+      const b = await registrarCobro('c_prueba_1', 1, 'PAGO');
+      return { a, colaA, b, cola: leerCola().length, commits: window.__fs.log.commits.length, pagadas: clientes[0].pagadas };
     });
-    expect(r.res.ok).toBe(true);
-    expect(r.commits).toHaveLength(1);
-    expect(r.commits[0]).toHaveLength(2);
+    expect(r.a).toMatchObject({ ok: true, estado: 'pendiente' });
+    expect(r.colaA).toBe(1);
+    expect(r.b).toMatchObject({ ok: false, motivo: 'error' });
+    expect(r.cola).toBe(1);
+    expect(r.commits).toBe(0);
+    expect(r.pagadas).toBe(1);
+  });
+});
+
+/* ───────────── A1. Cobros sin red no pisan a otro teléfono ───────────── */
+test.describe('A1. cobros sin red', () => {
+  const K = 'usuarios/compartido/clientes/c_prueba_1';
+
+  test('un cobro sin red NO borra el cobro que otro teléfono hizo mientras tanto', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: false, cliente: { ...CLIENTE, pagos: [true, false, false, false, false, false], pagadas: 1, saldo: 5 * 1083 } });
+    const r = await page.evaluate(async (K) => {
+      await registrarCobro('c_prueba_1', 1, 'PAGO');                  // este teléfono, sin red: Q2
+      const d = window.__fs.store.get(K);                              // otro teléfono, con red: Q3
+      d.pagos[2] = true; d.pagadas = 2; window.__fs.store.set(K, d);
+      window.__online = true; await procesarColaCobros();
+      return window.__fs.store.get(K);
+    }, K);
+    expect(r.pagos.slice(0, 3)).toEqual([true, true, true]);          // antes quedaba [T,T,F]
+    expect(r.pagadas).toBe(3);
+    expect(r.saldo).toBe(3 * 1083);
+  });
+
+  test('duplicados: si el movimiento ya llegó a la nube, reintentar no lo repite', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
+    const r = await page.evaluate(async (K) => {
+      await registrarCobro('c_prueba_1', 0, 'PAGO');
+      // Simula: la transacción SÍ llegó al servidor pero el teléfono no recibió respuesta
+      const it = leerCola()[0];
+      window.__fs.store.set('usuarios/compartido/historial/' + it.log.id, it.log);
+      const d = window.__fs.store.get(K); d.pagos[0] = true; d.pagadas = 1; window.__fs.store.set(K, d);
+      window.__online = true;
+      await procesarColaCobros(); await procesarColaCobros();
+      const hist = [...window.__fs.store.keys()].filter(k => k.includes('/historial/'));
+      return { hist: hist.length, cola: leerCola().length, pagadas: window.__fs.store.get(K).pagadas, commits: window.__fs.log.commits.length };
+    }, K);
+    expect(r).toEqual({ hist: 1, cola: 0, pagadas: 1, commits: 0 });
+  });
+
+  test('transacción sin respuesta: el botón queda bloqueado mientras tanto y luego pasa a la cola', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: true, cliente: CLIENTE });
+    await page.evaluate(() => { window.__fs.ctl.tx = 'hang'; window.__p = registrarCobro('c_prueba_1', 0, 'PAGO'); });
+    await expect(page.locator('[data-pago="c_prueba_1_0"]')).toBeDisabled();
+    const otro = await page.evaluate(() => registrarCobro('c_prueba_1', 0, 'PAGO'));
+    expect(otro.motivo).toBe('ocupado');
+    const res = await page.evaluate(() => window.__p);
+    expect(res).toMatchObject({ ok: true, estado: 'pendiente' });
+    expect(await page.evaluate(() => leerCola().length)).toBe(1);
+  });
+
+  test('un cobro en cola no se "olvida" cuando llega la nube, y no se puede cobrar dos veces', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
+    const r = await page.evaluate(async () => {
+      await registrarCobro('c_prueba_1', 0, 'PAGO');
+      startFBSync();                                                  // la nube aún no tiene el cobro
+      await new Promise(res => setTimeout(res, 100));
+      const segundo = await registrarCobro('c_prueba_1', 0, 'PAGO');
+      return { p0: clientes[0].pagos[0], enHist: historial.filter(h => h.accion === 'PAGO').length, segundo, cola: leerCola().length };
+    });
+    expect(r.p0).toBe(true);
+    expect(r.enHist).toBe(1);
+    expect(r.segundo.motivo).toBe('sin_cambio');
+    expect(r.cola).toBe(1);
+  });
+});
+
+/* ───────────── A2. Ediciones simultáneas ───────────── */
+test.describe('A2. editar no borra cobros de otro teléfono', () => {
+  const K = 'usuarios/compartido/clientes/c_prueba_1';
+  async function abrirYCambiar(page, campos) {
+    await page.evaluate(() => editC('c_prueba_1'));
+    for (const [sel, v] of Object.entries(campos)) await page.fill(sel, v);
+  }
+
+  test('cambiar solo el teléfono no toca los pagos aunque otro teléfono haya cobrado', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: true, cliente: CLIENTE });
+    await abrirYCambiar(page, { '#f-tel': '5512345678' });
+    await page.evaluate((K) => {                                      // otro teléfono cobra Q1 mientras se edita
+      const d = window.__fs.store.get(K); d.pagos[0] = true; d.pagadas = 1; d.saldo = 5 * 1083; window.__fs.store.set(K, d);
+      clientes[0] = { ...clientes[0], pagos: d.pagos, pagadas: 1 };
+    }, K);
+    await page.click('#btn-save-c');
+    await expect(page.locator('#m-cliente')).not.toHaveClass(/open/);
+    const d = await page.evaluate((K) => window.__fs.store.get(K), K);
+    expect(d.telefono).toBe('5512345678');
+    expect(d.pagos[0]).toBe(true);
+    expect(d.pagadas).toBe(1);
+  });
+
+  test('cambiar quincenas pagadas cuando otro teléfono cobró: se rechaza y no escribe', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: true, cliente: CLIENTE });
+    await abrirYCambiar(page, { '#f-pag': '3' });
+    await page.evaluate((K) => { const d = window.__fs.store.get(K); d.pagos[0] = true; d.pagadas = 1; window.__fs.store.set(K, d); }, K);
+    await page.click('#btn-save-c');
+    await expect(page.locator('#toasts')).toContainText('Otro teléfono registró un cobro');
+    const r = await page.evaluate((K) => ({ d: window.__fs.store.get(K), commits: window.__fs.log.commits.length }), K);
+    expect(r.d.pagadas).toBe(1);
+    expect(r.commits).toBe(0);
+  });
+
+  test('cambiar quincenas pagadas sin conflicto deja un AJUSTE en el historial', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: true, cliente: CLIENTE });
+    await abrirYCambiar(page, { '#f-pag': '2' });
+    await page.click('#btn-save-c');
+    await expect(page.locator('#m-cliente')).not.toHaveClass(/open/);
+    const r = await page.evaluate((K) => ({ d: window.__fs.store.get(K),
+      aj: [...window.__fs.store.entries()].filter(([k, v]) => k.includes('/historial/') && v.accion === 'AJUSTE').map(([, v]) => v) }), K);
+    expect(r.d.pagadas).toBe(2);
+    expect(r.d.saldo).toBe(4 * 1083);
+    expect(r.aj).toHaveLength(1);
+    expect(r.aj[0]).toMatchObject({ monto: 0, antes: { pagadas: 0 }, despues: { pagadas: 2 } });
+  });
+
+  test('sin red no se permite cambiar dinero (sí datos básicos)', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
+    await abrirYCambiar(page, { '#f-pag': '2' });
+    await page.click('#btn-save-c');
+    await expect(page.locator('#toasts')).toContainText('necesita internet');
+    expect(await page.evaluate(() => window.__fs.log.commits.length)).toBe(0);
+  });
+});
+
+/* ───────────── A4 / M1 ───────────── */
+test('A4. con el almacenamiento lleno la pantalla se sigue actualizando y el error se ve [permite-error-js]', async ({ page }) => {
+  await modoFirebaseFalso(page, { online: true });
+  await page.evaluate(() => {
+    window.__fs.store.set('usuarios/compartido/clientes/c_nube', { ...{ id: 'c_nube', nombre: 'DESDE LA NUBE', producto: 'quincenal_fijo', monto: 5000, pq: 1083, nq: 6, pagadas: 0, saldo: 6498, pagos: [false,false,false,false,false,false], inicio: '2026-01-01', createdAt: '2026-01-01' } });
+    const orig = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (k, v) { if (k === 'hd_c' || k === 'hd_h') { const e = new Error('QuotaExceededError (simulado)'); e.name = 'QuotaExceededError'; throw e; } return orig.call(this, k, v); };
+    startFBSync();
+  });
+  await page.click('#sidebar .ni:has-text("Acreditados")');
+  await expect(page.locator('#tb-c')).toContainText('DESDE LA NUBE');
+  await expect(page.locator('#err-badge')).toBeVisible();
+});
+
+test.describe('M1. fecha local', () => {
+  test.use({ timezoneId: 'America/Mexico_City' });
+  test('[reloj] a las 19:30 del 14 (hora México) la fecha de inicio es el 14, no el 15', async ({ page }) => {
+    ctx = await arrancar(page, { reloj: '2026-08-14T19:30:00-06:00' });
+    await page.evaluate(() => openNew());
+    await expect(page.locator('#f-ini')).toHaveValue('2026-08-14');
   });
 });
 
@@ -275,19 +427,6 @@ test.describe('3. botón bloqueado y sin duplicados', () => {
     expect(r.a.ok).toBe(true);
     expect(r.b.motivo).toBe('ocupado');
     expect(r.pagadas).toBe(1);
-  });
-
-  test('el botón de cobro se ve bloqueado mientras procesa', async ({ page }) => {
-    await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
-    await page.evaluate(() => { window.__fs.ctl.commit = 'hang'; window.__p = registrarCobro('c_prueba_1', 0, 'PAGO'); });
-    const btn = page.locator('[data-pago="c_prueba_1_0"]');
-    await expect(btn).toBeDisabled();
-    // tocar mientras procesa no inicia otro cobro
-    await page.evaluate(() => initPago('c_prueba_1', 0));
-    const res = await page.evaluate(() => window.__p);
-    expect(res.estado).toBe('pendiente');
-    const n = await page.evaluate(() => window.__fs.log.commits.length);
-    expect(n).toBe(1);
   });
 
   test('tocar "Guardar" varias veces sin señal crea UN solo acreditado', async ({ page }) => {
@@ -335,7 +474,7 @@ test.describe('6. deshacer solo dice éxito si funcionó', () => {
     const r = await page.evaluate(async () => {
       await registrarCobro('c_prueba_1', 0, 'PAGO');
       document.getElementById('toasts').innerHTML = '';
-      window.__fs.ctl.tx = 'fail'; window.__fs.ctl.commit = 'reject';
+      window.__fs.ctl.tx = 'denied'; // error que NO es de red: no va a la cola
       const u = await undoLastPago();
       return { u, nube: window.__fs.store.get('usuarios/compartido/clientes/c_prueba_1') };
     });
@@ -515,6 +654,7 @@ test.describe('4. rescate de datos locales', () => {
     return json;
   }
   const nube = page => page.evaluate(() => Object.fromEntries(window.__fs.store));
+  const marcarTodo = page => page.evaluate(() => document.querySelectorAll('#resc-comparacion input[type=checkbox]').forEach(i => { i.checked = true; }));
   const sdkIniciado = page => page.evaluate(() => window.firebase ? window.firebase.apps.length : 0);
 
   test('[arranque] teléfono heredado: no conecta antes de descargar y confirmar', async ({ page }) => {
@@ -547,6 +687,7 @@ test.describe('4. rescate de datos locales', () => {
     await expect(cmp).toContainText('Solo en la nube (no se tocan): 1');
     expect(await page.evaluate(() => window.__fs.log.commits.length)).toBe(0); // comparar no escribe
     await expect(page.locator('#resc-subir')).toBeDisabled();
+    await marcarTodo(page); // teléfono heredado: sin fecha de sincronización, todo viene desmarcado
     await page.check('#resc-check2');
     await page.click('#resc-subir');
     await expect(page.locator('#resc-resultado')).toContainText('Acreditados creados en la nube: 1');
@@ -575,6 +716,7 @@ test.describe('4. rescate de datos locales', () => {
     ctx = await arrancar(page, { ls: LEGADO, firebaseFalso: true, nube: nubeCobrada });
     await pasarPaso1(page);
     await page.click('#resc-comparar');
+    await marcarTodo(page);
     await page.check('#resc-check2');
     await page.click('#resc-subir');
     await expect(page.locator('#resc-resultado')).toContainText('Ya estaban en la nube (no se duplicaron): 1');
@@ -634,6 +776,63 @@ test.describe('4. rescate de datos locales', () => {
     await expect(page.locator('#m-rescate')).toHaveClass(/open/, { timeout: 10000 }); // al volver: rescate, no reemplazo
     const c = await page.evaluate(() => JSON.parse(localStorage.getItem('hd_c'))[0].pagos[0]);
     expect(c).toBe(true);
+  });
+
+  test('[arranque] A3: un acreditado borrado en otro teléfono NO revive por defecto; uno creado aquí sí sube', async ({ page }) => {
+    const VIEJO = { ...C, id: 'c_borrado', nombre: 'BORRADO ALLA', createdAt: '2026-01-01T00:00:00.000Z' };
+    const NUEVO = { ...C, id: 'c_nuevo', nombre: 'NUEVO AQUI', createdAt: '2026-10-05T00:00:00.000Z' };
+    ctx = await arrancar(page, {
+      ls: { hd_fb: JSON.stringify({ apiKey: 'falsa', projectId: 'demo-prueba' }), hd_rescate_pendiente: '1',
+            hd_ultima_sync: '2026-10-01T00:00:00.000Z', hd_c: [VIEJO, NUEVO], hd_h: [mov('h_b', 'c_borrado', 'BORRADO ALLA')] },
+      firebaseFalso: true, nube: {} });
+    await pasarPaso1(page);
+    await page.click('#resc-comparar');
+    await expect(page.locator('#resc-comparacion')).toContainText('podría haberse borrado en otro teléfono');
+    await expect(page.locator('input[data-resc-cli="c_borrado"]')).not.toBeChecked();
+    await expect(page.locator('input[data-resc-mov="h_b"]')).not.toBeChecked();
+    await expect(page.locator('input[data-resc-cli="c_nuevo"]')).toBeChecked();
+    await page.check('#resc-check2');
+    await page.click('#resc-subir');
+    await expect(page.locator('#resc-resultado')).toContainText('Acreditados creados en la nube: 1');
+    const n = await nube(page);
+    expect(n[NUBE + 'clientes/c_nuevo']).toBeTruthy();
+    expect(n[NUBE + 'clientes/c_borrado']).toBeUndefined();
+    expect(n[NUBE + 'historial/h_b']).toBeUndefined();
+    // …y sigue en el teléfono (no se borra nada local)
+    const local = await page.evaluate(() => JSON.parse(localStorage.getItem('hd_c')).map(c => c.id));
+    expect(local).toContain('c_borrado');
+  });
+
+  test('[arranque] M7: un movimiento local más viejo que un cambio de la nube no se sube', async ({ page }) => {
+    const reversoNuevo = { ...mov('h_rev', 'c_A', 'ANA'), accion: 'REVERSO', ts: '2026-09-20T10:00:00.000Z' };
+    ctx = await arrancar(page, { ls: LEGADO, firebaseFalso: true, nube: { ...NUBE_BASE, [NUBE + 'historial/h_rev']: reversoNuevo } });
+    await pasarPaso1(page);
+    await page.click('#resc-comparar');
+    await expect(page.locator('#resc-comparacion')).toContainText('la nube tiene un cambio más reciente');
+    await expect(page.locator('input[data-resc-mov="h_local_A"]')).toHaveCount(0);
+  });
+
+  test('[arranque] M5: un qIndex malicioso no inyecta HTML en la comparación', async ({ page }) => {
+    const malo = { ...mov('h_malo', 'c_A', 'ANA'), qIndex: '<img src=x onerror="window.__xss=1">' };
+    ctx = await arrancar(page, { ls: { ...LEGADO, hd_h: [malo] }, firebaseFalso: true, nube: NUBE_BASE });
+    await pasarPaso1(page);
+    await page.click('#resc-comparar');
+    await expect(page.locator('#resc-comparacion')).toContainText('Q?');
+    expect(await page.locator('#resc-comparacion img').count()).toBe(0);
+    expect(await page.evaluate(() => window.__xss)).toBeUndefined();
+  });
+
+  test('[arranque] A4: las copias de rescate solo se borran a mano, con doble confirmación y si ya se descargaron', async ({ page }) => {
+    ctx = await arrancar(page, { ls: { hd_fb: 'local', hd_local_manual: '1',
+      hd_rescate_111: { clientes: [], historial: [] }, hd_rescate_222: { clientes: [], historial: [] }, hd_rescate_333: { clientes: [], historial: [] },
+      hd_rescate_descargados: ['hd_rescate_111', 'hd_rescate_222'], hd_rescate_actual: 'hd_rescate_222' } });
+    await page.evaluate(() => abrirErrores());
+    await expect(page.locator('#esp-info')).toContainText('ya descargadas: 1');
+    await page.click('#esp-borrar');                                   // 1er toque: solo pide confirmar
+    expect(await page.evaluate(() => localStorage.getItem('hd_rescate_111'))).not.toBeNull();
+    await page.click('#esp-borrar');                                   // 2º toque: borra
+    const r = await page.evaluate(() => ['hd_rescate_111', 'hd_rescate_222', 'hd_rescate_333'].map(k => localStorage.getItem(k) !== null));
+    expect(r).toEqual([false, true, true]); // la actual y la no descargada se quedan
   });
 });
 

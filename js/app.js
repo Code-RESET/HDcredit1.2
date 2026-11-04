@@ -340,5 +340,6 @@ window.abrirErrores=abrirErrores; window.limpiarErrores=limpiarErrores;
 window.rescateDescargar=rescateDescargar; window.rescateComparar=rescateComparar;
 window.rescateSubir=rescateSubir; window.rescateSeguirLocal=rescateSeguirLocal;
 window.rescateTerminar=rescateTerminar; window.reintentarConexion=reintentarConexion;
+window.borrarCopiasDescargadas=borrarCopiasDescargadas;
 
 init();

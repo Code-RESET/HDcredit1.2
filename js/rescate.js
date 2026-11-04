@@ -87,28 +87,49 @@ function rescateDescargar() {
   a.download = 'HDCredit_rescate_' + _fechaLocalISO() + '.json';
   a.click();
   _rescate.descargado = true;
-  if (_rescate.key) { try { localStorage.setItem('hd_rescate_descargado', _rescate.key); } catch(e) {} }
+  if (_rescate.key) {
+    try {
+      localStorage.setItem('hd_rescate_descargado', _rescate.key);
+      const lista = _leerLS('hd_rescate_descargados');
+      if (!lista.includes(_rescate.key)) { lista.push(_rescate.key); localStorage.setItem('hd_rescate_descargados', JSON.stringify(lista)); }
+    } catch(e) { reportarError('Marcar copia de rescate como descargada', e); }
+  }
   toast('Respaldo descargado. Confirma que lo guardaste para continuar.', 'ok');
   _rescateBotones();
 }
 
-// Comparación pura (sin red) — se exporta para las pruebas
-function compararLocalNube(local, nube) {
+// Comparación pura (sin red) — se exporta para las pruebas.
+// ultimaSync: momento (ISO) de la última copia confirmada por la nube en
+// este teléfono. Un acreditado que falta en la nube y ya existía antes de
+// esa fecha probablemente lo BORRÓ otro teléfono: no se marca por defecto.
+function compararLocalNube(local, nube, ultimaSync = null) {
   const nubeC = new Map(nube.clientes.map(c => [c.id, c]));
   const nubeH = new Set(nube.historial.map(h => h.id));
   const localC = new Map(local.clientes.filter(c => c && c.id).map(c => [c.id, c]));
   const acreditadosFaltantes = local.clientes.filter(c => c && c.id && !nubeC.has(c.id));
+  const posiblesBorrados = acreditadosFaltantes
+    .filter(c => !(ultimaSync && c.createdAt && String(c.createdAt) > String(ultimaSync)))
+    .map(c => c.id);
+  // Último movimiento de la nube por acreditado + quincena
+  const ultimoNube = new Map();
+  nube.historial.forEach(h => {
+    if (!h || !Number.isInteger(h.qIndex)) return;
+    const k = h.clienteId + '|' + h.qIndex, prev = ultimoNube.get(k);
+    if (!prev || String(h.ts) > String(prev.ts)) ultimoNube.set(k, h);
+  });
   const movimientos = [], noAplicables = [];
   local.historial.filter(h => h && h.id && !nubeH.has(h.id)).forEach(h => {
-    if (!localC.has(h.clienteId) && !nubeC.has(h.clienteId)) noAplicables.push({ h, motivo: 'el acreditado ya no existe' });
-    else if (!Number.isInteger(h.qIndex) || (h.accion !== 'PAGO' && h.accion !== 'REVERSO')) noAplicables.push({ h, motivo: 'movimiento sin quincena o acción' });
-    else movimientos.push(h);
+    if (!localC.has(h.clienteId) && !nubeC.has(h.clienteId)) { noAplicables.push({ h, motivo: 'el acreditado ya no existe' }); return; }
+    if (!Number.isInteger(h.qIndex) || (h.accion !== 'PAGO' && h.accion !== 'REVERSO')) { noAplicables.push({ h, motivo: 'movimiento sin quincena o acción (revisar a mano)' }); return; }
+    const u = ultimoNube.get(h.clienteId + '|' + h.qIndex);
+    if (u && String(u.ts) > String(h.ts)) { noAplicables.push({ h, motivo: 'la nube tiene un cambio más reciente en esa quincena' }); return; }
+    movimientos.push(h);
   });
   movimientos.sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
   const conDiferencias = local.clientes.filter(c => c && nubeC.has(c.id)
     && JSON.stringify(c.pagos || []) !== JSON.stringify(nubeC.get(c.id).pagos || []));
   const soloEnNube = nube.clientes.filter(c => !localC.has(c.id));
-  return { acreditadosFaltantes, movimientos, noAplicables, conDiferencias, soloEnNube };
+  return { acreditadosFaltantes, posiblesBorrados, movimientos, noAplicables, conDiferencias, soloEnNube };
 }
 
 function _lista(items, fmt) {
@@ -119,18 +140,28 @@ function _lista(items, fmt) {
 }
 
 function _pintarComparacion(diff) {
-  const mov = h => `${esc(h.nombre || h.clienteId)} · Q${(h.qIndex ?? 0) + 1} · ${esc(h.accion)} · ${esc(h.fecha || h.ts || '')}`;
+  // Todo lo que viene de datos se escapa (incluido qIndex, que puede venir
+  // de un respaldo o documento manipulado)
+  const q = h => Number.isInteger(h.qIndex) ? 'Q' + (h.qIndex + 1) : 'Q?';
+  const mov = h => `${esc(h.nombre || h.clienteId)} · ${q(h)} · ${esc(h.accion)} · ${esc(h.fecha || h.ts || '')}`;
+  const borr = new Set(diff.posiblesBorrados || []);
   const nada = !diff.acreditadosFaltantes.length && !diff.movimientos.length;
+  const chk = (attr, id, on, texto) =>
+    `<label style="display:flex;gap:6px;align-items:flex-start;margin:3px 0"><input type="checkbox" ${attr}="${esc(id)}"${on ? ' checked' : ''}><span>${texto}</span></label>`;
+  const cliHtml = diff.acreditadosFaltantes.map(c => chk('data-resc-cli', c.id, !borr.has(c.id),
+    `${esc(c.nombre)} <span style="color:var(--muted)">(alta ${esc(String(c.createdAt || '—').slice(0, 10))})</span>`
+    + (borr.has(c.id) ? ' <strong style="color:var(--warn)">⚠️ podría haberse borrado en otro teléfono — márcalo solo si es correcto</strong>' : ' · creado en este teléfono'))).join('');
+  const movHtml = diff.movimientos.map(h => chk('data-resc-mov', h.id, !borr.has(h.clienteId), mov(h))).join('');
   document.getElementById('resc-comparacion').innerHTML = `
     ${nada ? '<p style="color:var(--accent);margin-bottom:8px">✅ Todo lo de este teléfono ya está en la nube.</p>' : ''}
-    <div class="rsc-sec"><h4>Acreditados que faltan en la nube: ${diff.acreditadosFaltantes.length}</h4>${_lista(diff.acreditadosFaltantes, c => esc(c.nombre))}</div>
-    <div class="rsc-sec"><h4>Cobros / reversos que faltan en la nube: ${diff.movimientos.length}</h4>${_lista(diff.movimientos, mov)}</div>
+    <div class="rsc-sec"><h4>Acreditados que faltan en la nube: ${diff.acreditadosFaltantes.length}</h4>${cliHtml}</div>
+    <div class="rsc-sec"><h4>Cobros / reversos que faltan en la nube: ${diff.movimientos.length}</h4>${movHtml}</div>
     <div class="rsc-sec"><h4>Acreditados con pagos distintos (la nube NO se reemplaza): ${diff.conDiferencias.length}</h4>${_lista(diff.conDiferencias, c => esc(c.nombre))}</div>
     <div class="rsc-sec"><h4>Solo en la nube (no se tocan): ${diff.soloEnNube.length}</h4></div>
     ${diff.noAplicables.length ? `<div class="rsc-sec"><h4>No se pueden subir automáticamente (quedan en la copia de rescate): ${diff.noAplicables.length}</h4>${_lista(diff.noAplicables, x => mov(x.h) + ' — ' + esc(x.motivo))}</div>` : ''}`;
   document.getElementById('resc-subir').innerHTML = nada
     ? '<i class="fas fa-check"></i> Nada que subir — continuar'
-    : `<i class="fas fa-cloud-upload-alt"></i> Subir ${diff.acreditadosFaltantes.length} acreditados y ${diff.movimientos.length} movimientos`;
+    : '<i class="fas fa-cloud-upload-alt"></i> Subir los marcados';
 }
 
 async function rescateComparar() {
@@ -155,7 +186,7 @@ async function rescateComparar() {
       historial: hs.docs.map(d => ({ id: d.id, ...d.data() })),
     };
     _rescate.local = _datosLocalesActuales();
-    _rescate.diff = compararLocalNube(_rescate.local, _rescate.nube);
+    _rescate.diff = compararLocalNube(_rescate.local, _rescate.nube, localStorage.getItem('hd_ultima_sync'));
     _pintarComparacion(_rescate.diff);
     document.getElementById('resc-paso1').hidden = true;
     document.getElementById('resc-paso2').hidden = false;
@@ -175,13 +206,20 @@ async function rescateComparar() {
 // nube se crea con lo local; si existe, cada movimiento se aplica como
 // PAGO/REVERSO explícito sobre el dato de la nube (lo que ya está igual no
 // se vuelve a escribir → sin duplicados).
-async function _subirAcreditado(id, localCli, movs) {
+// crearSiFalta: el usuario marcó este acreditado para crearlo en la nube.
+// Si no lo marcó y no existe, no se revive (ni con sus movimientos).
+async function _subirAcreditado(id, localCli, movsTodos, crearSiFalta) {
   return DB.runTransaction(async tx => {
+    // Firestore exige leer todo antes de escribir
     const ref = CLI().doc(id);
     const snap = await tx.get(ref);
+    const existentes = [];
+    for (const h of movsTodos) existentes.push((await tx.get(HIST().doc(h.id))).exists);
     const res = { creado: 0, aplicados: 0, yaEstaban: 0, omitidos: 0 };
+    // Movimiento con el mismo id ya en la nube → no se duplica
+    const movs = movsTodos.filter((h, i) => { if (existentes[i]) { res.yaEstaban++; return false; } return true; });
     if (!snap.exists) {
-      if (!localCli) { res.omitidos += movs.length; return res; }
+      if (!localCli || !crearSiFalta) { res.omitidos += movs.length; return res; }
       tx.set(ref, { ...localCli, createdAt: localCli.createdAt || new Date().toISOString() });
       res.creado = 1;
       movs.forEach(h => { tx.set(HIST().doc(h.id), h); res.aplicados++; });
@@ -210,14 +248,19 @@ async function rescateSubir() {
   if (!navigator.onLine) { toast('Sin internet: todo se conserva en este teléfono', 'wrn'); return; }
   const diff = _rescate.diff;
   const localC = new Map(_rescate.local.clientes.map(c => [c.id, c]));
-  const ids = new Set([...diff.acreditadosFaltantes.map(c => c.id), ...diff.movimientos.map(h => h.clienteId)]);
+  // Solo lo que el usuario dejó marcado
+  const cliSel = new Set([...document.querySelectorAll('#resc-comparacion input[data-resc-cli]:checked')].map(i => i.getAttribute('data-resc-cli')));
+  const movSel = new Set([...document.querySelectorAll('#resc-comparacion input[data-resc-mov]:checked')].map(i => i.getAttribute('data-resc-mov')));
+  const movimientos = diff.movimientos.filter(h => movSel.has(h.id));
+  const ids = new Set([...cliSel, ...movimientos.map(h => h.clienteId)]);
   const btn = document.getElementById('resc-subir');
   btn.disabled = true;
-  const tot = { creados: 0, aplicados: 0, yaEstaban: 0, omitidos: diff.noAplicables.length, fallidos: 0 };
+  const noMarcados = (diff.acreditadosFaltantes.length - cliSel.size) + (diff.movimientos.length - movimientos.length);
+  const tot = { creados: 0, aplicados: 0, yaEstaban: 0, omitidos: diff.noAplicables.length + noMarcados, fallidos: 0 };
   for (const id of ids) {
-    const movs = diff.movimientos.filter(h => h.clienteId === id);
+    const movs = movimientos.filter(h => h.clienteId === id);
     try {
-      const r = await conTiempoLimite(_subirAcreditado(id, localC.get(id), movs), 30000, 'La nube no confirmó a tiempo');
+      const r = await conTiempoLimite(_subirAcreditado(id, localC.get(id), movs, cliSel.has(id)), 30000, 'La nube no confirmó a tiempo');
       tot.creados += r.creado; tot.aplicados += r.aplicados; tot.yaEstaban += r.yaEstaban; tot.omitidos += r.omitidos;
     } catch(e) {
       tot.fallidos++;
@@ -267,6 +310,46 @@ function rescateSeguirLocal() {
   setSyncLbl('sin-sync');
   mostrarBannerSinSync('rescate pendiente');
   toast('Todo se conserva en este teléfono. Toca "Reintentar" cuando tengas internet.', 'wrn');
+}
+
+/* ============================================================
+   ESPACIO DEL TELÉFONO
+   Las copias de rescate NUNCA se borran solas. Desde el panel de errores
+   se pueden borrar a mano (con doble confirmación) SOLO las que ya se
+   descargaron y que no son la copia del rescate en curso.
+============================================================ */
+function espacioUsadoKB() {
+  let n = 0;
+  try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); n += k.length + (localStorage.getItem(k) || '').length; } }
+  catch(e) {}
+  return Math.round(n * 2 / 1024); // UTF-16: ~2 bytes por carácter
+}
+function copiasBorrables() {
+  const actual = localStorage.getItem('hd_rescate_actual');
+  return _leerLS('hd_rescate_descargados').filter(k => k !== actual && localStorage.getItem(k) !== null);
+}
+function pintarEspacio() {
+  const el = document.getElementById('esp-info');
+  if (!el) return;
+  const n = copiasBorrables().length;
+  el.textContent = `Espacio usado en este teléfono: ~${espacioUsadoKB()} KB · Copias de rescate ya descargadas: ${n}`;
+  const btn = document.getElementById('esp-borrar');
+  if (btn) { btn.hidden = n === 0; btn.dataset.confirmar = ''; btn.textContent = `Borrar ${n} copia(s) ya descargada(s)`; }
+}
+function borrarCopiasDescargadas() {
+  const btn = document.getElementById('esp-borrar');
+  const borrables = copiasBorrables();
+  if (!borrables.length) return 0;
+  if (btn && btn.dataset.confirmar !== '1') {
+    btn.dataset.confirmar = '1';
+    btn.textContent = '¿Seguro? Toca otra vez para borrar (ya están descargadas)';
+    return 0;
+  }
+  borrables.forEach(k => localStorage.removeItem(k));
+  localStorage.setItem('hd_rescate_descargados', JSON.stringify(_leerLS('hd_rescate_descargados').filter(k => !borrables.includes(k))));
+  toast(`Se borraron ${borrables.length} copia(s) de rescate ya descargadas`, 'ok');
+  pintarEspacio();
+  return borrables.length;
 }
 
 function reintentarConexion() {

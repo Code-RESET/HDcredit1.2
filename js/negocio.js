@@ -162,14 +162,19 @@ function openNew() {
   document.getElementById('f-monto').value = '';
   document.getElementById('f-plazo').value = '';
   document.getElementById('f-pq').value = '';
-  document.getElementById('f-ini').value = new Date().toISOString().split('T')[0];
+  document.getElementById('f-ini').value = fechaLocalISO();
   document.getElementById('f-pag').value = '0';
   onProductoChange();
   om('m-cliente');
 }
 
+// Cómo estaba el acreditado al abrir "Editar": sirve para saber qué campos
+// cambió el usuario y para detectar si otro teléfono cambió los pagos.
+let _editBase = null;
 function editC(id) {
   const c = clientes.find(x=>x.id===id); if(!c) return;
+  _editBase = { id, producto: c.producto || 'quincenal_fijo', monto: c.monto, nq: c.nq, pq: c.pq,
+                pagadas: c.pagadas || 0, pagos: JSON.stringify(c.pagos || []) };
   document.getElementById('eid').value = id;
   document.getElementById('m-title').textContent = 'Editar Acreditado';
   document.getElementById('f-nom').value = c.nombre;
@@ -238,32 +243,69 @@ async function _saveC() {
   }
   if (!inicio && !eid) toast('⚠️ Sin fecha de inicio: no se podrán detectar atrasos automáticamente', 'wrn');
 
-  const saldo = Math.max(0, (nq - pagadas) * pq);
-  // Al editar: preservar el array pagos si el plazo y las quincenas pagadas no cambiaron
-  // (evita destruir el patrón de pagos individuales generado por reversiones)
-  let pagos;
-  if (eid) {
-    const existing = clientes.find(x=>x.id===eid);
-    if (existing && existing.nq === nq && existing.pagadas === pagadas && Array.isArray(existing.pagos)) {
-      pagos = existing.pagos.slice(0, nq);
-      while (pagos.length < nq) pagos.push(false);
-    } else {
-      pagos = Array(nq).fill(false).map((_,i) => i < pagadas);
-    }
-  } else {
-    pagos = Array(nq).fill(false).map((_,i) => i < pagadas);
-  }
-  const data = { nombre, producto, monto, pq, nq, inicio, pagadas, saldo, pagos, telefono, notas,
-    alerta: calcAlerta({saldo, pagadas, nq, inicio, producto}), updatedAt: new Date().toISOString() };
-
   let estado = 'ok';
   if (eid) {
-    if (USE_FB) {
-      try { estado = await esperarEscritura(CLI().doc(eid).set(data, {merge:true}), 'Guardar acreditado'); }
-      catch(e) { reportarError('Guardar acreditado', e); toast('No se pudo guardar en la nube: ' + e.message, 'err'); return; }
-    } else { const i = clientes.findIndex(x=>x.id===eid); if(i>=0) clientes[i]={...clientes[i],...data}; saveLocal(); refresh(); }
+    // EDITAR: nunca se reescriben pagos/pagadas/saldo si el usuario no
+    // cambió nada de dinero (así no se pisa un cobro de otro teléfono).
+    const base = (_editBase && _editBase.id === eid) ? _editBase : null;
+    if (!base) { toast('Vuelve a abrir "Editar" para guardar cambios', 'wrn'); return; }
+    const basicos = { nombre, telefono, notas, inicio, updatedAt: new Date().toISOString() };
+    const cambioDinero = producto !== base.producto || monto !== base.monto || nq !== base.nq || pagadas !== base.pagadas;
+    if (!cambioDinero) {
+      if (USE_FB) {
+        // merge de campos sueltos: funciona sin red y no toca los pagos
+        try { estado = await esperarEscritura(CLI().doc(eid).set(basicos, {merge:true}), 'Guardar acreditado'); }
+        catch(e) { reportarError('Guardar acreditado', e); toast('No se pudo guardar en la nube: ' + e.message, 'err'); return; }
+      } else {
+        const i = clientes.findIndex(x=>x.id===eid); if (i>=0) clientes[i] = {...clientes[i], ...basicos};
+        saveLocal(); refresh();
+      }
+    } else {
+      // Cambio de dinero (monto, plazo, producto o quincenas pagadas):
+      // se aplica sobre el dato MÁS RECIENTE y deja un AJUSTE en historial.
+      const nuevo = { producto, monto, nq, pq, pagadas };
+      if (USE_FB) {
+        if (!navigator.onLine) { toast('Cambiar monto, plazo o quincenas pagadas necesita internet (para no pisar cobros de otro teléfono)', 'err'); return; }
+        try {
+          const res = await conTiempoLimite(DB.runTransaction(async tx => {
+            const ref = CLI().doc(eid);
+            const snap = await tx.get(ref);
+            if (!snap.exists) { const err = new Error('El acreditado ya no existe en la nube'); err.code = 'hd/no-existe'; throw err; }
+            const actual = {...snap.data(), id: eid};
+            if ((actual.pagadas || 0) !== base.pagadas || JSON.stringify(actual.pagos || []) !== base.pagos) {
+              const err = new Error('Otro teléfono registró un cobro mientras editabas. Cierra y vuelve a abrir "Editar".');
+              err.code = 'hd/conflicto'; throw err;
+            }
+            const aj = calcularAjuste(actual, nuevo, basicos);
+            tx.set(ref, aj.campos, {merge:true});
+            tx.set(HIST().doc(aj.log.id), aj.log);
+            return aj;
+          }), 20000, 'La nube no respondió');
+          const i = clientes.findIndex(x => x.id === eid);
+          if (i >= 0) clientes[i] = { ...clientes[i], ...res.campos };
+          if (!historial.some(h => h.id === res.log.id)) historial.unshift(res.log);
+          refresh();
+        } catch(e) {
+          if (e.code !== 'hd/conflicto') reportarError('Guardar ajuste de acreditado', e);
+          toast('❌ ' + (e.code === 'hd/conflicto' ? e.message : 'No se pudo guardar en la nube: ' + e.message), 'err');
+          return;
+        }
+      } else {
+        const i = clientes.findIndex(x=>x.id===eid);
+        if (i < 0) { toast('Acreditado no encontrado', 'err'); return; }
+        const aj = calcularAjuste(clientes[i], nuevo, basicos);
+        clientes[i] = {...clientes[i], ...aj.campos};
+        historial.unshift(aj.log);
+        saveLocal(); refresh();
+      }
+    }
+    _editBase = null;
     toast(estado === 'pendiente' ? `${nombre} actualizado — pendiente de subir a la nube` : `${nombre} actualizado`, estado === 'pendiente' ? 'wrn' : 'ok');
   } else {
+    const saldo = Math.max(0, (nq - pagadas) * pq);
+    const pagos = Array(nq).fill(false).map((_,i) => i < pagadas);
+    const data = { nombre, producto, monto, pq, nq, inicio, pagadas, saldo, pagos, telefono, notas,
+      alerta: calcAlerta({saldo, pagadas, nq, inicio, producto}), updatedAt: new Date().toISOString() };
     // Mismo id para todos los intentos de este formulario (ver openNew)
     const id = _nuevoIdPendiente || (_nuevoIdPendiente = nuevoIdCliente());
     data.id = id; data.createdAt = new Date().toISOString();
@@ -327,9 +369,13 @@ async function delC(id) {
 const _cobrosEnCurso = new Set();
 function cobroEnCurso(cid) { return _cobrosEnCurso.has(cid); }
 
+function nuevoLogId() { return 'h_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7); }
+
 // Calcula el nuevo estado a partir del arreglo de pagos más reciente
 // conocido. Devuelve null si no hay nada que cambiar.
-function calcularCobro(c, pagosBase, qIdx, qKey, accion) {
+// logPrevio (opcional): conserva id/fecha/hora/ts de un movimiento ya
+// registrado (cola offline, rescate) — así reintentar nunca crea otro.
+function calcularCobro(c, pagosBase, qIdx, qKey, accion, logPrevio) {
   if (accion !== 'PAGO' && accion !== 'REVERSO') throw new Error('Acción de cobro inválida: ' + accion);
   const nq = c.nq || 12;
   if (!Number.isInteger(qIdx) || qIdx < 0 || qIdx >= nq) throw new Error('Quincena fuera de rango: ' + qIdx);
@@ -345,15 +391,140 @@ function calcularCobro(c, pagosBase, qIdx, qKey, accion) {
   const alerta = calcAlerta({...c, pagadas, saldo});
   const now = new Date();
   const log = {
-    id: 'h_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    id: (logPrevio && logPrevio.id) || nuevoLogId(),
     clienteId: c.id, nombre: c.nombre,
     monto: c.pq, qIndex: qIdx, qKey,
     accion,
-    fecha: now.toLocaleDateString('es-MX'),
-    hora: now.toLocaleTimeString('es-MX'),
-    ts: now.toISOString()
+    fecha: (logPrevio && logPrevio.fecha) || now.toLocaleDateString('es-MX'),
+    hora: (logPrevio && logPrevio.hora) || now.toLocaleTimeString('es-MX'),
+    ts: (logPrevio && logPrevio.ts) || now.toISOString()
   };
   return { pagos, pagadas, saldo, alerta, log, now };
+}
+
+/* ============================================================
+   COLA DE COBROS SIN RED
+   Sin conexión NO se escribe el arreglo `pagos` completo (pisaría los
+   cobros que otro teléfono hizo mientras tanto). Se guarda la INTENCIÓN
+   (acreditado, quincena, PAGO/REVERSO e id fijo del movimiento) en
+   localStorage 'hd_cola_cobros' y, al volver la red, cada una se aplica
+   con una transacción que relee la nube. Si el movimiento con ese id ya
+   existe en la nube, se salta: reintentar nunca duplica.
+   Los que fallan por algo que no es la red pasan a 'hd_cola_fallidos'
+   (nunca se borran solos) y se reportan.
+============================================================ */
+function leerCola(k = 'hd_cola_cobros') {
+  try { const v = JSON.parse(localStorage.getItem(k) || '[]'); return Array.isArray(v) ? v : []; }
+  catch(e) { reportarError('Leer cola de cobros', e); return []; }
+}
+function guardarCola(cola, k = 'hd_cola_cobros') {
+  localStorage.setItem(k, JSON.stringify(cola)); // si no hay espacio, lanza: el cobro NO se da por registrado
+}
+function esErrorDeRed(e) {
+  const c = (e && e.code) || '';
+  return c === 'unavailable' || c === 'deadline-exceeded' || c === 'hd/timeout' || c === 'hd/sin-red'
+    || /offline|network|failed to fetch/i.test((e && e.message) || '');
+}
+
+// Transacción de un cobro: relee acreditado y movimiento en la nube.
+// Devuelve el resultado, null (ya estaba así) o {yaAplicado:true}.
+function transaccionCobro(c, cid, qIdx, qKey, accion, logPrevio) {
+  return DB.runTransaction(async (tx) => {
+    const ref = CLI().doc(cid);
+    const href = HIST().doc(logPrevio.id);
+    const snap = await tx.get(ref);
+    const hsnap = await tx.get(href);
+    if (hsnap.exists) return { yaAplicado: true };
+    if (!snap.exists) { const err = new Error('El acreditado ya no existe en la nube'); err.code = 'hd/no-existe'; throw err; }
+    const fresh = {...c, ...snap.data(), id: cid};
+    const res = calcularCobro(fresh, fresh.pagos, qIdx, qKey, accion, logPrevio);
+    if (!res) return null;
+    tx.set(ref, camposCliente(res), {merge:true});
+    tx.set(href, res.log);
+    return res;
+  });
+}
+
+// Superpone los cobros en cola sobre los datos que llegan de la nube, para
+// que la pantalla no "olvide" un cobro hecho sin red (y no se cobre dos veces).
+function aplicarColaSobre(lista) {
+  const cola = leerCola();
+  if (!cola.length) return lista;
+  const out = lista.map(c => ({...c}));
+  cola.forEach(it => {
+    const i = out.findIndex(c => c.id === it.cid);
+    if (i < 0) return;
+    try {
+      const r = calcularCobro(out[i], out[i].pagos, it.qIdx, it.qKey, it.accion, it.log);
+      if (r) out[i] = {...out[i], pagos: r.pagos, pagadas: r.pagadas, saldo: r.saldo, alerta: r.alerta};
+    } catch(e) { /* índice inválido: se reporta al procesar la cola */ }
+  });
+  return out;
+}
+function movimientosEnCola() { return leerCola().map(it => it.log); }
+
+let _procesandoCola = false;
+async function procesarColaCobros() {
+  if (!USE_FB || !DB || _procesandoCola || !navigator.onLine) return;
+  let cola = leerCola();
+  if (!cola.length) return;
+  _procesandoCola = true;
+  let subidos = 0;
+  try {
+    while (cola.length) {
+      const it = cola[0];
+      const c = clientes.find(x => x.id === it.cid) || { id: it.cid, nombre: it.log.nombre, nq: it.nq, pq: it.log.monto };
+      try {
+        await conTiempoLimite(transaccionCobro(c, it.cid, it.qIdx, it.qKey, it.accion, it.log), 20000, 'La nube no respondió');
+        subidos++;
+      } catch(e) {
+        if (esErrorDeRed(e)) break; // se reintenta después; no se pierde
+        const fallidos = leerCola('hd_cola_fallidos');
+        fallidos.push({ ...it, error: e.message, fechaError: new Date().toISOString() });
+        try { guardarCola(fallidos, 'hd_cola_fallidos'); } catch(e2) { reportarError('Guardar cobro fallido', e2); }
+        reportarError('Subir cobro pendiente de ' + (it.log.nombre || it.cid), e);
+        toast(`❌ No se pudo subir un cobro pendiente de ${it.log.nombre || ''}: ${e.message}`, 'err');
+      }
+      cola = leerCola().filter(x => x.log.id !== it.log.id);
+      guardarCola(cola);
+    }
+  } catch(e) {
+    reportarError('Procesar cola de cobros', e);
+  } finally {
+    _procesandoCola = false;
+  }
+  if (subidos) toast(`☁️ ${subidos} cobro(s) pendiente(s) subidos a la nube`, 'ok');
+}
+window.addEventListener('online', () => { procesarColaCobros(); });
+setInterval(() => { procesarColaCobros(); }, 30000);
+
+// Ajuste manual de monto/plazo/producto/quincenas pagadas sobre el dato más
+// reciente. Conserva los pagos individuales que ya existían y deja un
+// movimiento AJUSTE (monto 0, sin quincena: no cuenta como cobro).
+function calcularAjuste(actual, nuevo, basicos) {
+  const nq = nuevo.nq;
+  const pagos = Array.isArray(actual.pagos)
+    ? actual.pagos.slice(0, nq)
+    : Array(nq).fill(false).map((_, j) => j < (actual.pagadas || 0));
+  while (pagos.length < nq) pagos.push(false);
+  const objetivo = Math.max(0, Math.min(nuevo.pagadas, nq));
+  let cuenta = pagos.filter(Boolean).length;
+  for (let i = 0; i < nq && cuenta < objetivo; i++) if (!pagos[i]) { pagos[i] = true; cuenta++; }
+  for (let i = nq - 1; i >= 0 && cuenta > objetivo; i--) if (pagos[i]) { pagos[i] = false; cuenta--; }
+  const pagadas = cuenta;
+  const saldo = Math.max(0, (nq - pagadas) * nuevo.pq);
+  const alerta = calcAlerta({ ...actual, ...nuevo, inicio: basicos.inicio, pagadas, saldo });
+  const antes = { producto: actual.producto || 'quincenal_fijo', monto: actual.monto, nq: actual.nq, pq: actual.pq, pagadas: actual.pagadas || 0, saldo: actual.saldo };
+  const despues = { producto: nuevo.producto, monto: nuevo.monto, nq, pq: nuevo.pq, pagadas, saldo };
+  const now = new Date();
+  const log = {
+    id: nuevoLogId(), clienteId: actual.id, nombre: basicos.nombre,
+    monto: 0, qIndex: null, qKey: null, accion: 'AJUSTE',
+    detalle: `Pagadas ${antes.pagadas}→${pagadas} · Monto ${antes.monto}→${nuevo.monto} · Plazo ${antes.nq}→${nq} · Saldo ${antes.saldo}→${saldo}`,
+    antes, despues,
+    fecha: now.toLocaleDateString('es-MX'), hora: now.toLocaleTimeString('es-MX'), ts: now.toISOString()
+  };
+  return { campos: { ...basicos, ...nuevo, nq, pagos, pagadas, saldo, alerta }, log };
 }
 
 function camposCliente(r) {
@@ -400,39 +571,33 @@ async function _registrarCobro(c, cid, qIdx, accion, opts) {
   let r = null, estado = 'ok';
 
   if (USE_FB) {
+    // El id del movimiento se fija UNA vez: la transacción, un reintento y
+    // la cola offline usan el mismo, así nunca se duplica en el historial.
+    const logPrevio = { id: nuevoLogId() };
     let hecho = false;
     // Con red: transacción real — relee el acreditado en el servidor, así
     // la decisión "ya estaba cobrado" se toma con el dato más reciente.
     if (navigator.onLine) {
       try {
-        r = await DB.runTransaction(async (tx) => {
-          const ref = CLI().doc(cid);
-          const snap = await tx.get(ref);
-          if (!snap.exists) { const err = new Error('El acreditado ya no existe en la nube'); err.code = 'hd/no-existe'; throw err; }
-          const fresh = {...c, ...snap.data(), id: cid};
-          const res = calcularCobro(fresh, fresh.pagos, qIdx, qKey, accion);
-          if (!res) return null;
-          tx.set(ref, camposCliente(res), {merge:true});
-          tx.set(HIST().doc(res.log.id), res.log);
-          return res;
-        });
+        const res = await conTiempoLimite(transaccionCobro(c, cid, qIdx, qKey, accion, logPrevio), 15000, 'La nube no respondió');
+        r = (res && res.yaAplicado) ? null : res;
         hecho = true;
+        if (res && res.yaAplicado) return { ok:true, estado:'ok', accion };
       } catch(e) {
-        if (e.code === 'hd/no-existe') throw e;
-        console.warn('HD Crédit — transacción de cobro falló, se usa escritura en lote:', e.code || e.message);
+        // Solo un problema de RED pasa a la cola; cualquier otro error se muestra
+        if (!esErrorDeRed(e)) throw e;
+        console.warn('HD Crédit — sin respuesta de la nube, el cobro queda en cola:', e.code || e.message);
       }
     }
-    // Sin red (o la transacción falló): UN SOLO lote atómico con acreditado
-    // + historial. Firestore lo guarda en la cola offline y lo sube completo
-    // o nada. Se usa la copia local más reciente (incluye los cambios
-    // pendientes de este teléfono).
+    // Sin red: se guarda la intención en la cola del teléfono (no se
+    // escribe `pagos` completo, que pisaría cobros de otros teléfonos).
     if (!hecho) {
-      r = calcularCobro(c, c.pagos, qIdx, qKey, accion);
+      r = calcularCobro(c, c.pagos, qIdx, qKey, accion, logPrevio);
       if (r) {
-        const batch = DB.batch();
-        batch.set(CLI().doc(cid), camposCliente(r), {merge:true});
-        batch.set(HIST().doc(r.log.id), r.log);
-        estado = await esperarEscritura(batch.commit(), 'Registrar ' + accion);
+        const cola = leerCola();
+        cola.push({ cid, qIdx, qKey, accion, nq: c.nq, log: r.log, creado: new Date().toISOString() });
+        guardarCola(cola); // si no hay espacio lanza → error visible, el cobro no se da por hecho
+        estado = 'pendiente';
       }
     }
     if (r) aplicarCobroEnMemoria(cid, r);
