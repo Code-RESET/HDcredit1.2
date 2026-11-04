@@ -252,6 +252,7 @@ tbody tr:last-child td{border-bottom:none}
 /* UNDO BAR */
 .err-badge{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:6500;display:flex;align-items:center;gap:6px;background:var(--danger);color:#fff;border:0;border-radius:999px;padding:9px 14px;font-size:.8rem;font-weight:700;box-shadow:var(--shadow);cursor:pointer}
 .err-badge[hidden]{display:none}
+.rev-badge{background:var(--warn);color:#111;bottom:calc(64px + env(safe-area-inset-bottom,0px))}
 .banner-sinsync{position:fixed;left:0;right:0;top:0;z-index:6400;display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;background:var(--danger);color:#fff;font-size:.8rem;font-weight:700;padding:calc(6px + env(safe-area-inset-top,0px)) 16px 6px}
 .banner-sinsync[hidden]{display:none}
 .rsc-sec{border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
@@ -417,6 +418,8 @@ tbody tr:last-child td{border-bottom:none}
     </div>
   </div>
 </nav>
+<!-- Aviso fijo de cobros por revisar (rechazados por la nube o posible cobro doble) -->
+<button id="rev-badge" class="err-badge rev-badge" onclick="abrirRevision()" hidden title="Cobros por revisar"><i class="fas fa-exclamation-triangle"></i> <span id="rev-count">0</span> cobros por revisar</button>
 <!-- Aviso fijo de errores silenciosos (fuera del sidebar para que siempre se vea) -->
 <button id="err-badge" class="err-badge" onclick="abrirErrores()" hidden title="Ver errores registrados"><i class="fas fa-bug"></i> <span id="err-count">0</span> errores</button>
 
@@ -695,6 +698,16 @@ tbody tr:last-child td{border-bottom:none}
       <button class="btn btn-s" id="rest-cancel" onclick="cm('m-restaurar')">Cancelar</button>
       <button class="btn btn-d" id="rest-ok"><i class="fas fa-upload"></i> Sí, restaurar</button>
     </div>
+  </div>
+</div>
+
+<!-- Cobros por revisar -->
+<div class="overlay" id="m-revq" role="dialog" aria-modal="true" aria-label="Cobros por revisar">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-exclamation-triangle" style="color:var(--warn);margin-right:8px"></i>Cobros por revisar</div><button class="btn-x" onclick="cm('m-revq')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
+    <p style="color:var(--muted);font-size:.8rem;margin-bottom:12px">Cobros hechos en este teléfono que no se subieron a la nube, o que la nube ya tenía (posible cobro doble). Revisa cada uno con el acreditado. También se incluyen en el respaldo JSON y en el Excel.</p>
+    <div id="revq-body"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn btn-s" onclick="cm('m-revq')">Cerrar</button></div>
   </div>
 </div>
 

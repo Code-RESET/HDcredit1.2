@@ -264,6 +264,12 @@ async function _saveC() {
       // Cambio de dinero (monto, plazo, producto o quincenas pagadas):
       // se aplica sobre el dato MÁS RECIENTE y deja un AJUSTE en historial.
       const nuevo = { producto, monto, nq, pq, pagadas };
+      // Cobros de este acreditado aún sin subir: la nube no los tiene, así que
+      // comparar daría un falso "otro teléfono cobró". Hay que esperar.
+      if (USE_FB && leerCola().some(it => it.cid === eid)) {
+        toast(`Hay cobros de ${nombre} pendientes de subir a la nube. Espera a que se sincronicen para cambiar monto, plazo o quincenas pagadas.`, 'wrn');
+        return;
+      }
       if (USE_FB) {
         if (!navigator.onLine) { toast('Cambiar monto, plazo o quincenas pagadas necesita internet (para no pisar cobros de otro teléfono)', 'err'); return; }
         try {
@@ -420,10 +426,99 @@ function leerCola(k = 'hd_cola_cobros') {
 function guardarCola(cola, k = 'hd_cola_cobros') {
   localStorage.setItem(k, JSON.stringify(cola)); // si no hay espacio, lanza: el cobro NO se da por registrado
 }
+// Errores pasajeros: el movimiento se queda en la cola y se reintenta solo
 function esErrorDeRed(e) {
   const c = (e && e.code) || '';
   return c === 'unavailable' || c === 'deadline-exceeded' || c === 'hd/timeout' || c === 'hd/sin-red'
+    || c === 'aborted' || c === 'unauthenticated'
     || /offline|network|failed to fetch/i.test((e && e.message) || '');
+}
+
+// Mientras haya un rescate pendiente o en curso, la cola NO sube nada:
+// el usuario decide en el rescate qué se sube.
+function rescatePendiente() {
+  return localStorage.getItem('hd_rescate_pendiente') === '1'
+    || (typeof _rescate !== 'undefined' && !!_rescate);
+}
+
+/* ============================================================
+   COBROS POR REVISAR ('hd_cola_fallidos')
+   - tipo 'fallido': la nube lo rechazó (acreditado borrado, quincena
+     fuera de plazo, permiso…). Se puede reintentar.
+   - tipo 'revision': la nube ya tenía esa quincena así (posible cobro
+     doble), o quedó fuera en el rescate. Se revisa a mano.
+   Nada se borra sin confirmación; lo descartado pasa a
+   'hd_cola_descartados' (no se elimina).
+============================================================ */
+function leerRevision() { return leerCola('hd_cola_fallidos'); }
+function moverARevision(it, tipo, motivo) {
+  const lista = leerRevision();
+  if (!lista.some(x => x.log && it.log && x.log.id === it.log.id)) {
+    lista.push({ cid: it.cid, qIdx: it.qIdx, qKey: it.qKey, accion: it.accion, nq: it.nq, log: it.log, creado: it.creado,
+                 tipo, motivo, fechaRevision: new Date().toISOString() });
+  }
+  try { guardarCola(lista, 'hd_cola_fallidos'); }
+  catch(e) { reportarError('Guardar cobro por revisar', e); }
+  pintarAvisoRevision();
+}
+function pintarAvisoRevision() {
+  const b = document.getElementById('rev-badge');
+  if (!b) return;
+  const n = leerRevision().length;
+  b.hidden = n === 0;
+  const c = document.getElementById('rev-count');
+  if (c) c.textContent = n;
+}
+function abrirRevision() {
+  const lista = leerRevision();
+  const body = document.getElementById('revq-body');
+  body.innerHTML = lista.length ? lista.map(it => {
+    const id = esc(it.log && it.log.id);
+    const q = Number.isInteger(it.qIdx) ? 'Q' + (it.qIdx + 1) : 'Q?';
+    return `<div class="err-item" data-revq="${id}">
+      <div class="err-meta">${esc((it.log && it.log.fecha) || '')} ${esc((it.log && it.log.hora) || '')} · <strong>${it.tipo === 'fallido' ? 'NO SE SUBIÓ' : 'REVISAR'}</strong></div>
+      <div class="err-msg"><strong>${esc((it.log && it.log.nombre) || it.cid)}</strong> · ${q} · ${esc(it.accion)} · $${esc(Number((it.log && it.log.monto) || 0).toLocaleString('es-MX'))}</div>
+      <div class="err-meta" style="margin-top:4px">${esc(it.motivo || '')}</div>
+      <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
+        ${it.tipo === 'fallido' ? `<button class="btn btn-s btn-sm" onclick="reintentarRevision('${id}')"><i class="fas fa-redo"></i> Reintentar</button>` : ''}
+        <button class="btn btn-s btn-sm" data-descartar="${id}" onclick="descartarRevision('${id}', this)">Descartar</button>
+      </div>
+    </div>`;
+  }).join('') : '<p style="color:var(--muted)">No hay cobros por revisar ✅</p>';
+  om('m-revq');
+}
+function reintentarRevision(logId) {
+  const lista = leerRevision();
+  const it = lista.find(x => x.log && x.log.id === logId);
+  if (!it) return false;
+  const cola = leerCola();
+  if (!cola.some(x => x.log.id === logId)) cola.push({ cid: it.cid, qIdx: it.qIdx, qKey: it.qKey, accion: it.accion, nq: it.nq, log: it.log, creado: it.creado });
+  guardarCola(cola);
+  guardarCola(lista.filter(x => x !== it), 'hd_cola_fallidos');
+  pintarAvisoRevision();
+  if (document.getElementById('m-revq').classList.contains('open')) abrirRevision();
+  toast('Reintentando subir el cobro…', 'wa');
+  return procesarColaCobros();
+}
+// Doble confirmación: el primer toque solo pide confirmar
+function descartarRevision(logId, btn) {
+  if (btn && btn.dataset.confirmar !== '1') {
+    btn.dataset.confirmar = '1';
+    btn.textContent = '¿Seguro? Toca otra vez para descartar';
+    return false;
+  }
+  const lista = leerRevision();
+  const it = lista.find(x => x.log && x.log.id === logId);
+  if (!it) return false;
+  const desc = leerCola('hd_cola_descartados');
+  desc.push({ ...it, fechaDescarte: new Date().toISOString() });
+  try { guardarCola(desc, 'hd_cola_descartados'); }
+  catch(e) { reportarError('Guardar cobro descartado', e); toast('No hay espacio para guardar el descarte; no se descartó', 'err'); return false; }
+  guardarCola(lista.filter(x => x !== it), 'hd_cola_fallidos');
+  pintarAvisoRevision();
+  abrirRevision();
+  toast('Cobro descartado (queda guardado en el teléfono como descartado)', 'wrn');
+  return true;
 }
 
 // Transacción de un cobro: relee acreditado y movimiento en la nube.
@@ -465,25 +560,49 @@ function movimientosEnCola() { return leerCola().map(it => it.log); }
 
 let _procesandoCola = false;
 async function procesarColaCobros() {
-  if (!USE_FB || !DB || _procesandoCola || !navigator.onLine) return;
+  if (!USE_FB || !DB || _procesandoCola || !navigator.onLine || rescatePendiente()) return;
   let cola = leerCola();
   if (!cola.length) return;
   _procesandoCola = true;
-  let subidos = 0;
+  let subidos = 0, revisar = 0, fallidos = 0;
+  // Si un movimiento de un acreditado falla o queda en revisión, los que
+  // siguen de ESE acreditado también van a revisión (un REVERSO posterior
+  // podría deshacer el cobro real de otro teléfono).
+  const bloqueados = new Set();
   try {
     while (cola.length) {
+      if (rescatePendiente()) break;
       const it = cola[0];
-      const c = clientes.find(x => x.id === it.cid) || { id: it.cid, nombre: it.log.nombre, nq: it.nq, pq: it.log.monto };
-      try {
-        await conTiempoLimite(transaccionCobro(c, it.cid, it.qIdx, it.qKey, it.accion, it.log), 20000, 'La nube no respondió');
-        subidos++;
-      } catch(e) {
-        if (esErrorDeRed(e)) break; // se reintenta después; no se pierde
-        const fallidos = leerCola('hd_cola_fallidos');
-        fallidos.push({ ...it, error: e.message, fechaError: new Date().toISOString() });
-        try { guardarCola(fallidos, 'hd_cola_fallidos'); } catch(e2) { reportarError('Guardar cobro fallido', e2); }
-        reportarError('Subir cobro pendiente de ' + (it.log.nombre || it.cid), e);
-        toast(`❌ No se pudo subir un cobro pendiente de ${it.log.nombre || ''}: ${e.message}`, 'err');
+      const nombre = it.log.nombre || it.cid;
+      const q = Number.isInteger(it.qIdx) ? 'Q' + (it.qIdx + 1) : '';
+      if (bloqueados.has(it.cid)) {
+        moverARevision(it, 'revision', 'Depende de un movimiento anterior de este acreditado que quedó por revisar');
+        revisar++;
+      } else {
+        const c = clientes.find(x => x.id === it.cid) || { id: it.cid, nombre: it.log.nombre, nq: it.nq, pq: it.log.monto };
+        try {
+          const res = await conTiempoLimite(transaccionCobro(c, it.cid, it.qIdx, it.qKey, it.accion, it.log), 20000, 'La nube no respondió');
+          if (res === null) {
+            // La nube ya tenía esa quincena así: NO se subió nada
+            moverARevision(it, 'revision', it.accion === 'PAGO'
+              ? `Posible cobro doble: ${nombre} ${q} ya estaba cobrada en la nube por otro teléfono`
+              : `${nombre} ${q} ya estaba sin pagar en la nube (otro teléfono)`);
+            bloqueados.add(it.cid);
+            revisar++;
+            toast(it.accion === 'PAGO'
+              ? `⚠️ Posible cobro doble: ${nombre} ${q} ya estaba cobrada por otro teléfono. Revisa "Cobros por revisar".`
+              : `⚠️ ${nombre} ${q}: el reverso no se aplicó (la nube ya la tenía sin pagar). Revisa "Cobros por revisar".`, 'wrn');
+          } else {
+            subidos++; // incluye {yaAplicado}: ya estaba en la nube con ese mismo id
+          }
+        } catch(e) {
+          if (esErrorDeRed(e)) break; // se reintenta después; no se pierde
+          moverARevision(it, 'fallido', e.message);
+          bloqueados.add(it.cid);
+          fallidos++;
+          reportarError('Subir cobro pendiente de ' + nombre, e);
+          toast(`❌ No se pudo subir un cobro de ${nombre} ${q}: ${e.message}. Revisa "Cobros por revisar".`, 'err');
+        }
       }
       cola = leerCola().filter(x => x.log.id !== it.log.id);
       guardarCola(cola);
@@ -494,6 +613,8 @@ async function procesarColaCobros() {
     _procesandoCola = false;
   }
   if (subidos) toast(`☁️ ${subidos} cobro(s) pendiente(s) subidos a la nube`, 'ok');
+  if (subidos || revisar || fallidos) { try { refresh(); } catch(e) {} }
+  return { subidos, revisar, fallidos };
 }
 window.addEventListener('online', () => { procesarColaCobros(); });
 setInterval(() => { procesarColaCobros(); }, 30000);
@@ -575,9 +696,13 @@ async function _registrarCobro(c, cid, qIdx, accion, opts) {
     // la cola offline usan el mismo, así nunca se duplica en el historial.
     const logPrevio = { id: nuevoLogId() };
     let hecho = false;
+    // Si este acreditado tiene movimientos en cola, el nuevo va DETRÁS de
+    // ellos (en orden): un REVERSO no puede adelantarse al PAGO que aún no
+    // sube y dejar la quincena pagada al final.
+    const enColaCliente = leerCola().some(it => it.cid === cid);
     // Con red: transacción real — relee el acreditado en el servidor, así
     // la decisión "ya estaba cobrado" se toma con el dato más reciente.
-    if (navigator.onLine) {
+    if (navigator.onLine && !enColaCliente && !rescatePendiente()) {
       try {
         const res = await conTiempoLimite(transaccionCobro(c, cid, qIdx, qKey, accion, logPrevio), 15000, 'La nube no respondió');
         r = (res && res.yaAplicado) ? null : res;
@@ -598,6 +723,7 @@ async function _registrarCobro(c, cid, qIdx, accion, opts) {
         cola.push({ cid, qIdx, qKey, accion, nq: c.nq, log: r.log, creado: new Date().toISOString() });
         guardarCola(cola); // si no hay espacio lanza → error visible, el cobro no se da por hecho
         estado = 'pendiente';
+        if (navigator.onLine) setTimeout(() => { procesarColaCobros(); }, 0);
       }
     }
     if (r) aplicarCobroEnMemoria(cid, r);

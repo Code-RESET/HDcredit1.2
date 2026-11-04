@@ -263,16 +263,17 @@ test.describe('2. acreditado + historial en una sola operación', () => {
       window.__fs.ctl.tx = 'fail';
       const a = await registrarCobro('c_prueba_1', 0, 'PAGO');
       const colaA = leerCola().length;
+      await new Promise(res => setTimeout(res, 50));    // deja correr el intento automático de la cola
+      localStorage.removeItem('hd_cola_cobros');        // (para probar el otro caso sin cola previa)
       window.__fs.ctl.tx = 'denied';
       const b = await registrarCobro('c_prueba_1', 1, 'PAGO');
-      return { a, colaA, b, cola: leerCola().length, commits: window.__fs.log.commits.length, pagadas: clientes[0].pagadas };
+      return { a, colaA, b, cola: leerCola().length, commits: window.__fs.log.commits.length };
     });
     expect(r.a).toMatchObject({ ok: true, estado: 'pendiente' });
     expect(r.colaA).toBe(1);
     expect(r.b).toMatchObject({ ok: false, motivo: 'error' });
-    expect(r.cola).toBe(1);
+    expect(r.cola).toBe(0);
     expect(r.commits).toBe(0);
-    expect(r.pagadas).toBe(1);
   });
 });
 
@@ -847,4 +848,140 @@ test('4. comparación local ↔ nube (función pura)', async ({ page }) => {
   expect(r.noAplicables.map(x => x.h.id).sort()).toEqual(['h2', 'h3']);
   expect(r.conDiferencias.map(c => c.id)).toEqual(['a']);
   expect(r.soloEnNube.map(c => c.id)).toEqual(['z']);
+});
+
+/* ───────────── Cola: rechazados, cobro doble, orden, rescate, edición ───────────── */
+test.describe('Cola de cobros: casos de revisión', () => {
+  const K = 'usuarios/compartido/clientes/c_prueba_1';
+  // Cobro sin red: queda en cola sin intentar subir
+  const cobrarSinRed = (page, qIdx = 0, accion = 'PAGO') => page.evaluate(({ qIdx, accion }) => {
+    window.__online = false; return registrarCobro('c_prueba_1', qIdx, accion);
+  }, { qIdx, accion });
+
+  test('ALTO: un cobro rechazado por la nube se ve, entra al respaldo y se puede reintentar', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
+    await cobrarSinRed(page);
+    const r = await page.evaluate(async (K) => {
+      const guardado = window.__fs.store.get(K);
+      window.__fs.store.delete(K);                                   // otro teléfono lo borró
+      window.__online = true;
+      const p = await procesarColaCobros();
+      return { p, guardado, rev: leerRevision(), cola: leerCola().length };
+    }, K);
+    expect(r.p).toMatchObject({ subidos: 0, fallidos: 1 });
+    expect(r.cola).toBe(0);
+    expect(r.rev).toHaveLength(1);
+    expect(r.rev[0].tipo).toBe('fallido');
+    await expect(page.locator('#rev-badge')).toBeVisible();
+    await expect(page.locator('#rev-count')).toHaveText('1');
+    await page.click('#rev-badge');
+    await expect(page.locator('#revq-body')).toContainText('NO SE SUBIÓ');
+    await expect(page.locator('#revq-body')).toContainText('PRUEBA COBRO');
+    // Entra al respaldo JSON
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.evaluate(() => doExportJSON())]);
+    const json = JSON.parse(require('fs').readFileSync(await dl.path(), 'utf8'));
+    expect(json.cobrosPorRevisar).toHaveLength(1);
+    // Reintentar (ya con el acreditado de vuelta en la nube)
+    await page.evaluate(({ K, g }) => window.__fs.store.set(K, g), { K, g: r.guardado });
+    await page.click('#revq-body button:has-text("Reintentar")');
+    await expect.poll(() => page.evaluate((K) => window.__fs.store.get(K).pagos[0], K)).toBe(true);
+    expect(await page.evaluate(() => leerRevision().length)).toBe(0);
+    await expect(page.locator('#rev-badge')).toBeHidden();
+  });
+
+  test('ALTO: descartar un cobro por revisar pide doble confirmación y lo conserva como descartado', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
+    await cobrarSinRed(page);
+    await page.evaluate(async (K) => { window.__fs.store.delete(K); window.__online = true; await procesarColaCobros(); abrirRevision(); }, K);
+    const btn = page.locator('#revq-body button:has-text("Descartar")');
+    await btn.click();
+    expect(await page.evaluate(() => leerRevision().length)).toBe(1);   // un toque no basta
+    await page.click('#revq-body button[data-descartar]');
+    const r = await page.evaluate(() => ({ rev: leerRevision().length, desc: leerCola('hd_cola_descartados').length }));
+    expect(r).toEqual({ rev: 0, desc: 1 });
+  });
+
+  test('MEDIO 1: si otro teléfono ya cobró, no cuenta como subido, avisa posible cobro doble y lo registra', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
+    await cobrarSinRed(page, 0, 'PAGO');
+    await cobrarSinRed(page, 0, 'REVERSO');                          // deshace el propio, también sin red
+    const r = await page.evaluate(async (K) => {
+      const d = window.__fs.store.get(K); d.pagos[0] = true; d.pagadas = 1; window.__fs.store.set(K, d); // otro teléfono cobró Q1
+      document.getElementById('toasts').innerHTML = '';
+      window.__online = true;
+      const p = await procesarColaCobros();
+      return { p, rev: leerRevision(), nube: window.__fs.store.get(K),
+               hist: [...window.__fs.store.keys()].filter(k => k.includes('/historial/')).length };
+    }, K);
+    expect(r.p).toMatchObject({ subidos: 0, revisar: 2 });
+    expect(r.rev.map(x => x.tipo)).toEqual(['revision', 'revision']);
+    expect(r.rev[0].motivo).toContain('Posible cobro doble');
+    expect(r.nube.pagos[0]).toBe(true);   // el REVERSO NO deshizo el cobro real del otro teléfono
+    expect(r.hist).toBe(0);
+    await expect(page.locator('#toasts')).toContainText('Posible cobro doble');
+    await expect(page.locator('#toasts')).not.toContainText('subidos a la nube');
+  });
+
+  test('MEDIO 2: un reverso con red mientras el cobro sigue en cola no deja la quincena pagada', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
+    await cobrarSinRed(page, 0, 'PAGO');
+    const r = await page.evaluate(async (K) => {
+      window.__online = true;                                         // vuelve la red; la cola aún no se procesó
+      const rev = await registrarCobro('c_prueba_1', 0, 'REVERSO');
+      for (let i = 0; i < 40 && leerCola().length; i++) await new Promise(res => setTimeout(res, 50));
+      const hist = [...window.__fs.store.values()].filter(v => v.clienteId === 'c_prueba_1').map(v => v.accion).sort();
+      return { rev, nube: window.__fs.store.get(K), hist, cola: leerCola().length };
+    }, K);
+    expect(r.rev.ok).toBe(true);
+    expect(r.cola).toBe(0);
+    expect(r.nube.pagos[0]).toBe(false);
+    expect(r.nube.pagadas).toBe(0);
+    expect(r.hist).toEqual(['PAGO', 'REVERSO']);
+  });
+
+  test('MEDIO 4: con cobros en cola, editar dinero avisa que hay pendientes (no un falso "otro teléfono cobró")', async ({ page }) => {
+    await modoFirebaseFalso(page, { online: false, cliente: CLIENTE });
+    await cobrarSinRed(page, 0, 'PAGO');
+    await page.evaluate(() => { window.__online = true; editC('c_prueba_1'); });
+    await page.fill('#f-pag', '3');
+    await page.click('#btn-save-c');
+    await expect(page.locator('#toasts')).toContainText('pendientes de subir');
+    await expect(page.locator('#toasts')).not.toContainText('Otro teléfono registró');
+    const r = await page.evaluate((K) => ({ pag: window.__fs.store.get(K).pagadas, aj: [...window.__fs.store.values()].filter(v => v.accion === 'AJUSTE').length }), K);
+    expect(r).toEqual({ pag: 0, aj: 0 });
+  });
+});
+
+test.describe('MEDIO 3: la cola no se adelanta al rescate', () => {
+  const NUBE = 'usuarios/compartido/';
+  const item = { cid: 'c_prueba_1', qIdx: 0, qKey: '2026-09-15', accion: 'PAGO', nq: 6, creado: '2026-09-15T16:00:00.000Z',
+                 log: { id: 'h_q1', clienteId: 'c_prueba_1', nombre: 'PRUEBA COBRO', monto: 1083, qIndex: 0, qKey: '2026-09-15', accion: 'PAGO',
+                        fecha: '15/9/2026', hora: '10:00:00', ts: '2026-09-15T16:00:00.000Z' } };
+  const PAGADO = { ...CLIENTE, pagos: [true, false, false, false, false, false], pagadas: 1, saldo: 5 * 1083 };
+
+  test('[arranque] nada se sube antes de confirmar y una casilla desmarcada se respeta', async ({ page }) => {
+    ctx = await arrancar(page, {
+      ls: { hd_fb: JSON.stringify({ apiKey: 'falsa', projectId: 'demo-prueba' }), hd_rescate_pendiente: '1',
+            hd_c: [PAGADO], hd_h: [], hd_cola_cobros: [item] },
+      firebaseFalso: true, nube: { [NUBE + 'clientes/c_prueba_1']: { ...CLIENTE } } });
+    await expect(page.locator('#m-rescate')).toHaveClass(/open/);
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#resc-descargar')]);
+    const json = JSON.parse(require('fs').readFileSync(await dl.path(), 'utf8'));
+    expect(json.colaPendiente).toHaveLength(1);                     // la cola va en el respaldo del rescate
+    await page.check('#resc-check');
+    await page.click('#resc-comparar');
+    await expect(page.locator('input[data-resc-mov="h_q1"]')).toBeVisible();
+    // Con la nube ya conectada, ni el evento "online" ni el temporizador suben la cola
+    await page.evaluate(async () => { window.dispatchEvent(new Event('online')); await procesarColaCobros(); });
+    expect(await page.evaluate(() => window.__fs.log.commits.length)).toBe(0);
+    await page.uncheck('input[data-resc-mov="h_q1"]');
+    await page.check('#resc-check2');
+    await page.click('#resc-subir');
+    await page.click('#resc-terminar');
+    await page.evaluate(async () => { await procesarColaCobros(); await new Promise(r => setTimeout(r, 100)); });
+    const r = await page.evaluate((K) => ({
+      p0: window.__fs.store.get(K).pagos[0], hist: window.__fs.store.has('usuarios/compartido/historial/h_q1'),
+      cola: leerCola().length, rev: leerRevision().map(x => x.log.id) }), NUBE + 'clientes/c_prueba_1');
+    expect(r).toEqual({ p0: false, hist: false, cola: 0, rev: ['h_q1'] }); // no se subió y quedó por revisar
+  });
 });

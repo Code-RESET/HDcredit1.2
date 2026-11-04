@@ -70,6 +70,23 @@ async function _generateXLSX() {
     XLSX.utils.book_append_sheet(wb, ws2, 'Historial');
   }
 
+  // Hoja 3: cobros que solo existen en este teléfono (en cola / por revisar)
+  const soloTelefono = [
+    ...leerCola().map(it => ({ ...it, estado: 'Pendiente de subir', motivo: '' })),
+    ...leerRevision().map(it => ({ ...it, estado: it.tipo === 'fallido' ? 'No se subió' : 'Por revisar' })),
+  ];
+  if (soloTelefono.length) {
+    const ws3 = XLSX.utils.aoa_to_sheet([
+      ['Acreditado', 'Quincena', 'Tipo', 'Monto', 'Fecha', 'Hora', 'Estado', 'Motivo'],
+      ...soloTelefono.map(it => [
+        (it.log && it.log.nombre) || it.cid, Number.isInteger(it.qIdx) ? it.qIdx + 1 : '', it.accion,
+        (it.log && it.log.monto) || 0, (it.log && it.log.fecha) || '', (it.log && it.log.hora) || '', it.estado, it.motivo || ''
+      ])
+    ]);
+    ws3['!cols'] = [{wch:22},{wch:9},{wch:10},{wch:10},{wch:12},{wch:10},{wch:18},{wch:50}];
+    XLSX.utils.book_append_sheet(wb, ws3, 'Por revisar');
+  }
+
   const fname = 'HDCredit_' + fechaLocalISO() + '.xlsx';
   XLSX.writeFile(wb, fname);
   toast('Excel descargado ✅', 'ok');
@@ -180,7 +197,10 @@ async function doExportJSON() {
     try { historialCompleto = await obtenerHistorialCompleto(); }
     catch(e) { toast('No se pudo traer el historial completo, se respalda lo disponible: ' + e.message, 'wrn'); }
   }
-  const payload = { clientes, historial: historialCompleto, ts: new Date().toISOString(), v: '2.1' };
+  // Incluye también los cobros que solo existen en este teléfono: en cola
+  // (sin subir) y por revisar (rechazados o posible cobro doble)
+  const payload = { clientes, historial: historialCompleto, colaPendiente: leerCola(), cobrosPorRevisar: leerRevision(),
+                    ts: new Date().toISOString(), v: '2.1' };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'}));
   a.download = 'HDCredit_respaldo_' + fechaLocalISO() + '.json';

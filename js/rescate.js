@@ -18,7 +18,17 @@ function _leerLS(k) {
   catch(e) { reportarError('Leer ' + k, e); return []; }
 }
 function _datosLocalesActuales() {
-  return { clientes: _leerLS('hd_c'), historial: _leerLS('hd_h') };
+  // Los cobros en cola (sin subir) también entran a la comparación: así
+  // se ven y respetan las casillas como cualquier otro movimiento
+  const historial = _leerLS('hd_h');
+  const ids = new Set(historial.map(h => h && h.id));
+  _leerLS('hd_cola_cobros').forEach(it => { if (it && it.log && !ids.has(it.log.id)) { historial.unshift(it.log); ids.add(it.log.id); } });
+  return { clientes: _leerLS('hd_c'), historial };
+}
+// Lo que va en la copia de rescate y en el JSON descargado: además de
+// acreditados e historial, la cola sin subir y los cobros por revisar.
+function _paqueteRescate() {
+  return { ..._datosLocalesActuales(), colaPendiente: _leerLS('hd_cola_cobros'), cobrosPorRevisar: _leerLS('hd_cola_fallidos') };
 }
 
 function iniciarRescate(cfg) {
@@ -40,7 +50,7 @@ function iniciarRescate(cfg) {
   if (!key || previa !== contenido) {
     key = 'hd_rescate_' + Date.now();
     try {
-      localStorage.setItem(key, JSON.stringify({ ...local, ts: new Date().toISOString(), v: '2.1', origen: 'rescate' }));
+      localStorage.setItem(key, JSON.stringify({ ..._paqueteRescate(), ts: new Date().toISOString(), v: '2.1', origen: 'rescate' }));
       localStorage.setItem('hd_rescate_actual', key);
     } catch(e) {
       reportarError('Guardar copia de rescate', e);
@@ -80,8 +90,7 @@ function _fechaLocalISO() {
 
 function rescateDescargar() {
   if (!_rescate) return;
-  const local = _datosLocalesActuales();
-  const payload = { ...local, ts: new Date().toISOString(), v: '2.1', origen: 'rescate' };
+  const payload = { ..._paqueteRescate(), ts: new Date().toISOString(), v: '2.1', origen: 'rescate' };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
   a.download = 'HDCredit_rescate_' + _fechaLocalISO() + '.json';
@@ -158,6 +167,8 @@ function _pintarComparacion(diff) {
     <div class="rsc-sec"><h4>Cobros / reversos que faltan en la nube: ${diff.movimientos.length}</h4>${movHtml}</div>
     <div class="rsc-sec"><h4>Acreditados con pagos distintos (la nube NO se reemplaza): ${diff.conDiferencias.length}</h4>${_lista(diff.conDiferencias, c => esc(c.nombre))}</div>
     <div class="rsc-sec"><h4>Solo en la nube (no se tocan): ${diff.soloEnNube.length}</h4></div>
+    ${(() => { const rv = _leerLS('hd_cola_fallidos'); return rv.length
+      ? `<div class="rsc-sec"><h4>Cobros por revisar en este teléfono: ${rv.length}</h4><p style="color:var(--muted);font-size:.78rem">No se suben desde aquí; se revisan en "Cobros por revisar". Van incluidos en el respaldo.</p>${_lista(rv, it => mov(it.log || {}) + ' — ' + esc(it.motivo || ''))}</div>` : ''; })()}
     ${diff.noAplicables.length ? `<div class="rsc-sec"><h4>No se pueden subir automáticamente (quedan en la copia de rescate): ${diff.noAplicables.length}</h4>${_lista(diff.noAplicables, x => mov(x.h) + ' — ' + esc(x.motivo))}</div>` : ''}`;
   document.getElementById('resc-subir').innerHTML = nada
     ? '<i class="fas fa-check"></i> Nada que subir — continuar'
@@ -215,14 +226,14 @@ async function _subirAcreditado(id, localCli, movsTodos, crearSiFalta) {
     const snap = await tx.get(ref);
     const existentes = [];
     for (const h of movsTodos) existentes.push((await tx.get(HIST().doc(h.id))).exists);
-    const res = { creado: 0, aplicados: 0, yaEstaban: 0, omitidos: 0 };
+    const res = { creado: 0, aplicados: 0, yaEstaban: 0, omitidos: 0, ids: [] };
     // Movimiento con el mismo id ya en la nube → no se duplica
-    const movs = movsTodos.filter((h, i) => { if (existentes[i]) { res.yaEstaban++; return false; } return true; });
+    const movs = movsTodos.filter((h, i) => { if (existentes[i]) { res.yaEstaban++; res.ids.push(h.id); return false; } return true; });
     if (!snap.exists) {
       if (!localCli || !crearSiFalta) { res.omitidos += movs.length; return res; }
       tx.set(ref, { ...localCli, createdAt: localCli.createdAt || new Date().toISOString() });
       res.creado = 1;
-      movs.forEach(h => { tx.set(HIST().doc(h.id), h); res.aplicados++; });
+      movs.forEach(h => { tx.set(HIST().doc(h.id), h); res.aplicados++; res.ids.push(h.id); });
       return res;
     }
     let estado = { ...snap.data(), id };
@@ -235,6 +246,7 @@ async function _subirAcreditado(id, localCli, movsTodos, crearSiFalta) {
       estado = { ...estado, pagos: r.pagos, pagadas: r.pagadas, saldo: r.saldo, alerta: r.alerta };
       tx.set(HIST().doc(h.id), h); // mismo id que en el teléfono: idempotente
       res.aplicados++;
+      res.ids.push(h.id);
       cambio = true;
     }
     if (cambio) tx.set(ref, { pagos: estado.pagos, pagadas: estado.pagadas, saldo: estado.saldo, alerta: estado.alerta, updatedAt: new Date().toISOString() }, { merge: true });
@@ -262,6 +274,9 @@ async function rescateSubir() {
     try {
       const r = await conTiempoLimite(_subirAcreditado(id, localC.get(id), movs, cliSel.has(id)), 30000, 'La nube no confirmó a tiempo');
       tot.creados += r.creado; tot.aplicados += r.aplicados; tot.yaEstaban += r.yaEstaban; tot.omitidos += r.omitidos;
+      // Movimientos que quedaron confirmados en la nube (subidos o ya con ese id)
+      _rescate.subidos = _rescate.subidos || new Set();
+      r.ids.forEach(x => _rescate.subidos.add(x));
     } catch(e) {
       tot.fallidos++;
       reportarError('Rescate: subir ' + ((localC.get(id) || {}).nombre || id), e);
@@ -287,6 +302,14 @@ async function rescateSubir() {
 function rescateTerminar() {
   if (!_rescate || !USE_FB) return;
   if (!document.getElementById('resc-paso3').hidden || document.getElementById('resc-check2').checked) {
+    // La cola respeta lo decidido en el rescate: lo que ya quedó en la nube
+    // sale de la cola; lo desmarcado o no aplicable NO se sube solo después:
+    // pasa a "Cobros por revisar" (no se pierde).
+    const subidos = _rescate.subidos || new Set();
+    leerCola().forEach(it => {
+      if (!subidos.has(it.log.id)) moverARevision(it, 'revision', 'No se subió en el rescate (desmarcado, no aplicable o la nube ya lo tenía): revisar');
+    });
+    guardarCola([]);
     localStorage.setItem('hd_fb', JSON.stringify(_rescate.cfg));
     localStorage.removeItem('hd_rescate_pendiente');
     localStorage.removeItem('hd_local_manual');

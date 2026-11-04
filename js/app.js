@@ -149,7 +149,8 @@ function renderMorosos() {
 /* ============================================================
    MODAL / TOAST / VIEW HELPERS
 ============================================================ */
-function esc(s){ const d=document.createElement('div'); d.textContent=String(s??''); return d.innerHTML; }
+// Escapa también comillas: se usa dentro de atributos (data-*, onclick)
+function esc(s){ const d=document.createElement('div'); d.textContent=String(s??''); return d.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function om(id){document.getElementById(id).classList.add('open')}
 function cm(id){document.getElementById(id).classList.remove('open')}
 function set(id,v){document.getElementById(id).textContent=v}
@@ -280,6 +281,7 @@ function init(){
   initQSel();
   renderTF();
   pintarAvisoErrores(); // errores guardados de sesiones anteriores
+  pintarAvisoRevision(); // cobros por revisar guardados en el teléfono
 
   // Pide almacenamiento persistente para reducir el riesgo de que el
   // navegador borre localStorage bajo presión de espacio.
@@ -341,5 +343,6 @@ window.rescateDescargar=rescateDescargar; window.rescateComparar=rescateComparar
 window.rescateSubir=rescateSubir; window.rescateSeguirLocal=rescateSeguirLocal;
 window.rescateTerminar=rescateTerminar; window.reintentarConexion=reintentarConexion;
 window.borrarCopiasDescargadas=borrarCopiasDescargadas;
+window.abrirRevision=abrirRevision; window.reintentarRevision=reintentarRevision; window.descartarRevision=descartarRevision;
 
 init();
