@@ -121,8 +121,16 @@ async function arrancar(page, { reloj, ls = { hd_fb: 'local', hd_local_manual: '
     window.firebase = {
       apps: [],
       initializeApp(cfg) { this.apps.push(cfg); },
-      firestore: () => window.__fs.DBf,
-      auth: () => ({ signInAnonymously: () => Promise.resolve({}) }),
+      // Cuenta los usos de Firestore: "conectar" = usar Firestore (Auth sí
+      // se inicia antes, para el login)
+      firestore: () => { window.__fsUsos = (window.__fsUsos || 0) + 1; return window.__fs.DBf; },
+      // Sesión ya iniciada (usuario ficticio con correo y contraseña)
+      auth: () => ({
+        currentUser: { uid: 'uid-ficticio-cobrador', email: 'cobrador@ejemplo.test', isAnonymous: false },
+        onAuthStateChanged(cb) { setTimeout(() => cb(this.currentUser), 0); return () => {}; },
+        signOut: () => Promise.resolve(),
+        signInAnonymously: () => { throw new Error('no debe usarse el inicio anónimo'); },
+      }),
     };
   }, { firebaseFalso, nube, online });
   const errores = [];
@@ -656,7 +664,8 @@ test.describe('4. rescate de datos locales', () => {
   }
   const nube = page => page.evaluate(() => Object.fromEntries(window.__fs.store));
   const marcarTodo = page => page.evaluate(() => document.querySelectorAll('#resc-comparacion input[type=checkbox]').forEach(i => { i.checked = true; }));
-  const sdkIniciado = page => page.evaluate(() => window.firebase ? window.firebase.apps.length : 0);
+  // Antes del login solo se inicia Auth; lo que importa es que Firestore no se use
+  const sdkIniciado = page => page.evaluate(() => window.__fsUsos || 0);
 
   test('[arranque] teléfono heredado: no conecta antes de descargar y confirmar', async ({ page }) => {
     ctx = await arrancar(page, { ls: LEGADO, firebaseFalso: true, nube: NUBE_BASE });
@@ -766,7 +775,9 @@ test.describe('4. rescate de datos locales', () => {
 
   test('[arranque][permite-bloqueo] falla temporal: no guarda modo local y protege lo cobrado', async ({ page }) => {
     const cfg = JSON.stringify({ apiKey: 'falsa', projectId: 'demo-prueba' });
-    ctx = await arrancar(page, { ls: { hd_fb: cfg, hd_c: [{ ...CLIENTE }] } }); // sin SDK falso: la carga real se bloquea
+    // sin SDK falso: la carga real se bloquea. hd_sesion: este teléfono ya
+    // había iniciado sesión antes (sin eso se queda en el login; ver login.spec.js)
+    ctx = await arrancar(page, { ls: { hd_fb: cfg, hd_sesion: 'uid-ficticio-cobrador', hd_c: [{ ...CLIENTE }] } });
     await expect(page.locator('#banner-sinsync')).toBeVisible({ timeout: 15000 });
     await expect(page.locator('#sync-lbl')).toContainText('SIN SINCRONIZAR');
     expect(await page.evaluate(() => localStorage.getItem('hd_fb'))).toBe(cfg); // NO quedó 'local'

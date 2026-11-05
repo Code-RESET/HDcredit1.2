@@ -301,13 +301,17 @@ function init(){
 }
 
 // Decide cómo conectar SIN arriesgar datos que solo existen en este teléfono.
-function arrancarConexion(saved){
-  let cfg = DEFAULT_FB_CONFIG;
-  if (saved && saved !== 'local') {
-    try { cfg = JSON.parse(saved); } catch(e) { cfg = DEFAULT_FB_CONFIG; }
-  }
-  // 1. Modo local elegido a mano: se respeta
-  if (saved === 'local' && localStorage.getItem('hd_local_manual') === '1') { loadLocal(); return; }
+// En modo nube, primero se inicia sesión: antes de eso no se carga ni se
+// muestra ningún dato (ni de la nube ni la copia local).
+async function arrancarConexion(saved){
+  // 1. Modo local elegido a mano (sin nube): se respeta. No aplica al modo prueba.
+  if (!MODO_PRUEBA && saved === 'local' && localStorage.getItem('hd_local_manual') === '1') { ocultarLogin(); loadLocal(); return; }
+  const cfg = await configNube(saved);
+  if (!cfg) return; // bloqueado: se queda en la pantalla de aviso, sin datos
+  _cfgNube = cfg;
+  mostrarLogin();
+  const conSesion = await loadFirebaseSDK(cfg, { soloSesion: true });
+  if (!conSesion) return; // sin sesión: no se muestra nada
   // 2. Modo local heredado (versiones anteriores lo guardaban solo al
   //    fallar la red) o cambios hechos en modo local temporal: rescate
   //    obligatorio antes de reconectar — si hay algo que rescatar.
@@ -318,7 +322,7 @@ function arrancarConexion(saved){
     return;
   }
   // 3. Normal: conectar a la nube
-  if (!saved || saved === 'local') localStorage.setItem('hd_fb', JSON.stringify(cfg));
+  if (!MODO_PRUEBA && (!saved || saved === 'local')) localStorage.setItem('hd_fb', JSON.stringify(cfg));
   loadFirebaseSDK(cfg);
 }
 

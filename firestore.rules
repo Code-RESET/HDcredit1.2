@@ -1,0 +1,26 @@
+rules_version = '2';
+
+// Reglas de HD Crédit.
+// - Solo usuarios con correo y contraseña Y cuyo UID esté en la lista.
+// - Los usuarios anónimos (y cualquier otro proveedor) se rechazan.
+// - Todo lo que no esté listado abajo queda cerrado.
+//
+// AHORA: lista con el UID del Firebase de PRUEBA (hd-credit-prueba).
+// NO publicar en el proyecto real hasta seguir el orden del README
+// (sección "Login con correo y contraseña") y poner ahí los UID reales.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function autorizado() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider == 'password'
+        && request.auth.uid in [
+          'ZknvkenxXEgWugfxWbt3GnX7Fp53'  // usuario de prueba
+        ];
+    }
+
+    match /usuarios/compartido/{document=**} {
+      allow read, write: if autorizado();
+    }
+  }
+}

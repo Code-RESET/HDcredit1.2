@@ -376,9 +376,15 @@ function borrarCopiasDescargadas() {
 }
 
 function reintentarConexion() {
-  let cfg = DEFAULT_FB_CONFIG;
-  const saved = localStorage.getItem('hd_fb');
-  if (saved && saved !== 'local') { try { cfg = JSON.parse(saved); } catch(e) {} }
+  // Se reintenta con la MISMA configuración con la que arrancó la sesión
+  // (en modo prueba nunca se cae a la configuración real por defecto)
+  let cfg = _cfgNube;
+  if (!cfg) {
+    if (MODO_PRUEBA) { toast('Modo prueba sin configuración válida: recarga la página.', 'err'); return; }
+    cfg = DEFAULT_FB_CONFIG;
+    const saved = localStorage.getItem('hd_fb');
+    if (saved && saved !== 'local') { try { cfg = JSON.parse(saved); } catch(e) {} }
+  }
   if (localStorage.getItem('hd_rescate_pendiente') === '1' && hayDatosLocales()) { iniciarRescate(cfg); return; }
   loadFirebaseSDK(cfg);
 }

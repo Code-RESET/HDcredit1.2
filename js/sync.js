@@ -19,6 +19,8 @@ function connectFirebase() {
   } catch(e) {
     toast('Error: ' + e.message, 'err'); return;
   }
+  // En modo prueba la configuración sale SOLO de firebase-prueba.local.js
+  if (MODO_PRUEBA) { toast('Modo prueba: la configuración se toma de js/firebase-prueba.local.js', 'err'); return; }
   localStorage.setItem('hd_fb', JSON.stringify(cfg));
   // Si este teléfono venía trabajando en modo local y tiene datos, NO se
   // conecta directo (la nube reemplazaría lo local): pasa por el rescate.
@@ -33,12 +35,30 @@ function connectFirebase() {
 
 // opts.rescate: conexión para el rescate — no arranca la sincronización y,
 // si falla, no cambia de modo (el rescate decide). Devuelve true/false.
+// opts.soloSesion: carga el SDK y espera el login; no sincroniza ni carga
+// datos. Si falla sin una sesión previa en este teléfono, se queda en la
+// pantalla de login (no se muestra nada).
 function loadFirebaseSDK(cfg, opts = {}) {
   return new Promise(resolve => _loadFirebaseSDK(cfg, opts, resolve));
 }
 function _loadFirebaseSDK(cfg, opts, resolve) {
+  // Defensa extra: el modo prueba nunca toca el proyecto real
+  if (MODO_PRUEBA && esProyectoReal(cfg)) {
+    bloquearInicio('Modo prueba se niega a iniciar: la configuración apunta al proyecto REAL (' + PROYECTO_REAL + ').');
+    resolve(false);
+    return;
+  }
   const fallar = (msg) => {
     reportarError('Conectar Firebase', new Error(msg));
+    if (opts.soloSesion) {
+      // Sin internet al abrir: solo un teléfono que YA inició sesión antes
+      // sigue (con su copia local); uno sin sesión se queda en el login.
+      if (localStorage.getItem('hd_sesion')) { ocultarLogin(); resolve(true); return; }
+      mostrarLogin(msg + ' Se necesita internet para iniciar sesión la primera vez. Recarga la página para reintentar.', 'err');
+      formularioLogin(false);
+      resolve(false);
+      return;
+    }
     if (!opts.rescate) {
       toast(msg + ' Se trabaja en este dispositivo hasta reconectar.', 'err');
       modoLocalTemporal(msg);
@@ -70,10 +90,8 @@ function _loadFirebaseSDK(cfg, opts, resolve) {
     fallar('Firebase tardó demasiado en responder.');
   }, 12000);
 
-  // Se vuelve a cargar el SDK de Auth (además de app + firestore), pero SOLO
-  // para inicio de sesión anónimo y silencioso (sin ventana emergente, sin
-  // pantalla de Google) — ver authAnonimo() más abajo. No es el login
-  // interactivo que se quitó antes.
+  // SDK de Auth: login con correo y contraseña en la pantalla de la app
+  // (sin ventanas emergentes ni Google) — ver js/sesion.js.
   loadScript('https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js')
     .then(() => loadScript('https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js'))
     .then(() => loadScript('https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js'))
@@ -91,37 +109,18 @@ function _loadFirebaseSDK(cfg, opts, resolve) {
     });
 }
 
-// Sin login interactivo: todos los dispositivos comparten la misma ruta de
-// datos (usuarios/compartido/...). Antes esto solo estaba protegido por
-// reglas de Firestore abiertas a cualquiera; ahora cada dispositivo se
-// autentica solo (ver authAnonimo), para poder exigir "if request.auth !=
-// null" en las reglas sin volver a pedirle nada al usuario.
+// Todos los usuarios autorizados comparten la misma ruta de datos
+// (usuarios/compartido/...). Quién entra lo deciden el login (js/sesion.js)
+// y las reglas de Firestore (firestore.rules: solo UID autorizados).
 const UID_COMPARTIDO = 'compartido';
-
-// Inicia sesión anónima en segundo plano: identifica el dispositivo ante
-// Firestore SIN pedir nada al usuario (sin ventana, sin popup, sin Google).
-// Sirve para poder exigir "if request.auth != null" en las reglas de
-// Firestore en vez de dejarlas abiertas a cualquiera. Si falla o tarda, la
-// app sigue funcionando igual que hasta ahora (no bloquea nada) — solo
-// importa una vez que las reglas del proyecto se actualicen para exigirlo.
-function authAnonimo() {
-  return new Promise(resolve => {
-    let settled = false;
-    const t = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      console.warn('HD Crédit — auth anónima tardó demasiado, se continúa sin esperar más');
-      resolve(false);
-    }, 8000);
-    firebase.auth().signInAnonymously()
-      .then(() => { if (settled) return; settled = true; clearTimeout(t); resolve(true); })
-      .catch(e => { if (settled) return; settled = true; clearTimeout(t); console.warn('HD Crédit — auth anónima falló:', e.code || e.message); resolve(false); });
-  });
-}
+let _persistenciaPedida = false;
 
 async function initFB(cfg, opts = {}) {
   try {
     if (!firebase.apps.length) firebase.initializeApp(cfg);
+    // Nada de Firestore (ni su copia offline) antes de tener sesión
+    await asegurarSesion();
+    if (opts.soloSesion) return true;
     DB = firebase.firestore();
     USE_FB = true;
     document.getElementById('fb-cfg').style.display = 'none';
@@ -129,14 +128,16 @@ async function initFB(cfg, opts = {}) {
     // Persistencia offline: la app sigue funcionando sin internet (lee de la
     // copia local en el dispositivo) y los cobros que se hagan sin conexión
     // se guardan en cola y se suben solos en cuanto vuelve la señal
-    DB.enablePersistence({synchronizeTabs: true}).catch(e => {
-      // Sin persistencia, un cobro hecho sin señal se pierde al cerrar la app
-      reportarError('Persistencia offline no disponible', e);
-    });
+    if (!_persistenciaPedida) {
+      _persistenciaPedida = true;
+      DB.enablePersistence({synchronizeTabs: true}).catch(e => {
+        // Sin persistencia, un cobro hecho sin señal se pierde al cerrar la app
+        reportarError('Persistencia offline no disponible', e);
+      });
+    }
     // El estado real (sincronizado / local / subiendo) lo decide startFBSync()
     // a partir de snap.metadata, que refleja la conexión real con Firestore
     // (más confiable que navigator.onLine, que solo mira la red del dispositivo)
-    await authAnonimo();
     // En rescate todavía NO se sincroniza: la sincronización reemplazaría
     // los datos locales antes de compararlos
     if (opts.rescate) return true;
@@ -150,6 +151,7 @@ async function initFB(cfg, opts = {}) {
     reportarError('Iniciar Firebase', e);
     toast('Error Firebase: ' + e.message, 'err');
     USE_FB = false;
+    if (opts.soloSesion) { mostrarLogin('Error al iniciar Firebase: ' + e.message, 'err'); return false; }
     if (!opts.rescate) modoLocalTemporal('Error al iniciar Firebase');
     return false;
   }
@@ -204,6 +206,11 @@ function startFBSync() {
   }, err => {
     reportarError('Sincronización de acreditados', err);
     setSyncLbl('error');
+    if (err && err.code === 'permission-denied') {
+      const uid = (_usuario && _usuario.uid) || '?';
+      toast('Este usuario no está autorizado en las reglas (UID: ' + uid + ').', 'err');
+      return;
+    }
     if (Date.now() - _errToastAt > 30000) { _errToastAt = Date.now(); toast('Error de sincronización: ' + err.message, 'err'); }
   });
   // En vivo solo se sincroniza lo reciente (ventana de tiempo, no un conteo

@@ -2,22 +2,31 @@
 
 Sistema de control de pagos quincenal HD Crédit — PWA de archivo único (`index.html`), con sincronización opcional en Firebase/Firestore o almacenamiento solo local.
 
-## Sincronización sin inicio de sesión
+## Login con correo y contraseña
 
-Por decisión explícita del dueño de los datos, esta app **no pide iniciar sesión con Google** ni muestra ninguna pantalla de login. Todos los dispositivos leen y escriben la misma ruta compartida en Firestore (`usuarios/compartido/...`). El código de Firebase Authentication con Google Sign-In (el que causaba pantallas congeladas por antivirus/popups bloqueados) sigue eliminado por completo.
+La app pide **correo y contraseña** (Firebase Authentication, proveedor "Correo electrónico/contraseña") en su propia pantalla: sin ventanas de Google ni popups. El inicio de sesión anónimo se quitó. Antes de iniciar sesión **no se muestra ningún dato** (ni de la nube ni la copia guardada en el teléfono). La contraseña no se guarda en ningún archivo ni en el teléfono; Firebase conserva solo su token de sesión.
 
-### Autenticación anónima silenciosa (nuevo)
+Todos los usuarios autorizados comparten la ruta `usuarios/compartido/...`. Quién puede leer/escribir lo decide `firestore.rules`: solo los UID de la lista y solo con correo y contraseña (los anónimos se rechazan).
 
-La app ahora inicia sesión anónima en Firebase (`signInAnonymously()`) en segundo plano, sin ninguna interacción del usuario — no hay ventana, ni botón, ni cuenta que crear. Esto permite exigir en las reglas de Firestore `allow read, write: if request.auth != null;` en vez de dejarlas completamente abiertas a cualquiera que conozca la configuración del proyecto.
+- Sin internet: un teléfono que **ya inició sesión** antes sigue funcionando con su copia local; uno que nunca inició sesión se queda en el login.
+- "Cerrar sesión" (menú lateral) quita los datos de la pantalla; los cobros en cola se quedan guardados en el teléfono.
+- El modo "Solo local" elegido a mano sigue sin login (no usa la nube).
 
-Si la autenticación anónima falla o tarda (por ejemplo, si el proveedor "Anónimo" no está habilitado en el proyecto), la app **sigue funcionando exactamente igual que antes** — no bloquea nada, solo deja de cumplir el requisito de las reglas nuevas hasta que se resuelva.
+### Modo prueba (`?prueba=1`)
 
-**Para activar esta protección en un proyecto ya conectado (como el actual), hay que hacer dos pasos manuales en Firebase Console, en este orden:**
-1. **Authentication → Sign-in method → habilitar el proveedor "Anónimo".** Con este código ya desplegado, esto basta para que los dispositivos empiecen a autenticarse solos.
-2. **Confirmar que aparecen usuarios anónimos** en Authentication → Users (uno por dispositivo/navegador) antes de seguir.
-3. Recién entonces, **Firestore → Reglas** → cambiar `allow read, write: if true;` por `allow read, write: if request.auth != null;`. Hacerlo antes de confirmar el paso 2 dejaría la app sin poder sincronizar.
+1. Copia `js/firebase-prueba.example.js` como `js/firebase-prueba.local.js` (ignorado por git) y pega la configuración del Firebase **de prueba**.
+2. Abre `http://localhost:4173/index.html?prueba=1` (`npx http-server -p 4173 -c-1 .`).
 
-Mientras no se den estos pasos en la consola, las reglas siguen abiertas (`if true`) y todo sigue funcionando como hasta ahora — el cambio de código por sí solo no rompe nada, pero tampoco protege nada hasta que se actualicen las reglas.
+El modo prueba solo usa ese archivo y **se niega a iniciar** si apunta al proyecto real (`hdcredit12-2c6ba`), si falta el archivo, o si el navegador ya tiene datos de la app real. A la inversa, la app real se niega a conectar en un navegador marcado como de pruebas.
+
+### Activar en producción (orden seguro)
+
+1. Firebase real → Authentication → habilitar **Correo electrónico/contraseña** y crear los usuarios; anotar sus UID.
+2. Antes de desplegar: en cada teléfono, exportar un **respaldo JSON** y esperar a que no haya cobros en cola.
+3. Desplegar esta versión. La regla actual (`request.auth != null`) también acepta a estos usuarios, así que nada se corta.
+4. Iniciar sesión en cada teléfono y comprobar que sincroniza.
+5. Poner los UID reales en `firestore.rules`, probarlas en el simulador de reglas de la consola y **solo entonces** publicarlas.
+6. Deshabilitar el proveedor "Anónimo" y borrar los usuarios anónimos viejos.
 
 ## Modo offline
 

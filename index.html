@@ -234,6 +234,15 @@ tbody tr:last-child td{border-bottom:none}
 .ec-q.pd{background:var(--border);color:var(--muted)}
 .ec-q.nx{background:rgba(255,184,0,.2);border:1px solid var(--warn);color:var(--warn)}
 
+/* LOGIN — tapa toda la app hasta tener sesión (visible por defecto) */
+#login-scr{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:8000;padding:20px}
+#login-scr.on{display:flex}
+#login-scr .cfg-box{max-width:400px}
+.login-prueba{background:var(--warn);color:#000;font-weight:800;font-size:.78rem;padding:6px 10px;border-radius:var(--radius);margin-bottom:14px;text-align:center}
+#login-msg{font-size:.82rem;margin-top:10px;color:var(--danger);white-space:pre-line}
+#login-msg[data-tipo="info"]{color:var(--muted)}
+body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.sin-sesion #banner-sinsync{visibility:hidden}
+
 /* FIREBASE CONFIG */
 #fb-cfg{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:6000;padding:20px}
 .cfg-box{background:var(--card);border:1px solid var(--border2);border-radius:var(--radius-lg);padding:36px;width:100%;max-width:540px}
@@ -304,7 +313,28 @@ tbody tr:last-child td{border-bottom:none}
 }
 </style>
 </head>
-<body>
+<body class="sin-sesion">
+
+<!-- LOGIN: correo y contraseña. Visible desde el inicio; nada de la app
+     (ni datos) se muestra hasta iniciar sesión. Ver js/sesion.js -->
+<div id="login-scr" class="on" role="dialog" aria-modal="true" aria-label="Iniciar sesión">
+  <div class="cfg-box">
+    <div class="cfg-logo">HD Crédit</div>
+    <div id="login-prueba" class="login-prueba" hidden>🧪 MODO PRUEBA</div>
+    <form id="login-form" onsubmit="iniciarSesion(event)" autocomplete="on">
+      <div class="fg">
+        <label for="login-email">Correo</label>
+        <input class="fc" id="login-email" type="email" autocomplete="username" inputmode="email" required disabled>
+      </div>
+      <div class="fg">
+        <label for="login-pass">Contraseña</label>
+        <input class="fc" id="login-pass" type="password" autocomplete="current-password" required disabled>
+      </div>
+      <button class="btn btn-p" id="login-btn" type="submit" disabled><i class="fas fa-sign-in-alt"></i> Entrar</button>
+    </form>
+    <p id="login-msg" data-tipo="info">Cargando…</p>
+  </div>
+</div>
 
 <!-- LOADER -->
 <div id="loader">
@@ -362,8 +392,8 @@ tbody tr:last-child td{border-bottom:none}
     <div class="cfg-steps">
       <div class="cstep"><div class="csn">1</div><div>Ve a <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a> y crea un proyecto (sin Google Analytics).</div></div>
       <div class="cstep"><div class="csn">2</div><div>En el proyecto → <strong>Firestore Database</strong> → Crear base de datos → Modo producción.</div></div>
-      <div class="cstep"><div class="csn">3</div><div><strong>Authentication</strong> → pestaña <strong>Sign-in method</strong> → habilita el proveedor <strong>Anónimo</strong>.<br><span style="color:var(--muted);font-size:.73rem">No pide login al usuario — cada dispositivo se identifica solo, en silencio, sin ventana ni cuenta de Google.</span></div></div>
-      <div class="cstep"><div class="csn">4</div><div>Firestore → pestaña <strong>Reglas</strong> → reemplaza todo con:<br><code style="color:var(--accent);font-size:.75rem">rules_version='2'; service cloud.firestore { match /databases/{database}/documents { match /usuarios/{document=**} { allow read, write: if request.auth != null; } } }</code><br><span style="color:var(--muted);font-size:.73rem">Solo dispositivos con la app conectada (autenticados en silencio) pueden leer/escribir — ya no cualquiera que conozca la configuración.</span></div></div>
+      <div class="cstep"><div class="csn">3</div><div><strong>Authentication</strong> → <strong>Sign-in method</strong> → habilita <strong>Correo electrónico/contraseña</strong> (no habilites Anónimo). En <strong>Users</strong> crea cada usuario y copia su UID.</div></div>
+      <div class="cstep"><div class="csn">4</div><div>Firestore → <strong>Reglas</strong>: usa el archivo <code style="color:var(--accent)">firestore.rules</code> del proyecto con los UID autorizados.<br><span style="color:var(--muted);font-size:.73rem">Solo esos usuarios (con correo y contraseña) pueden leer/escribir; los anónimos se rechazan.</span></div></div>
       <div class="cstep"><div class="csn">5</div><div>Configuración del proyecto ⚙️ → <strong>Agregar app</strong> → Web (&lt;/&gt;) → copia el objeto <code style="color:var(--accent)">firebaseConfig</code>.</div></div>
       <div class="cstep"><div class="csn">6</div><div>Pega el JSON abajo y toca <strong>Conectar Firebase</strong>.</div></div>
     </div>
@@ -409,6 +439,7 @@ tbody tr:last-child td{border-bottom:none}
     <div class="ni" onclick="gv('morosos')"><i class="fas fa-exclamation-circle"></i> Morosos y Recargos <span class="nb" id="nb-mor" style="display:none">0</span></div>
     <div class="sb-sec">Config</div>
     <div class="ni" onclick="document.getElementById('fb-cfg').style.display='flex'"><i class="fas fa-fire"></i> Firebase</div>
+    <div class="ni" id="ni-salir" style="display:none" onclick="cerrarSesion()"><i class="fas fa-sign-out-alt"></i> Cerrar sesión</div>
   </div>
   <div class="sb-foot">
     <div class="av" id="sb-avatar">H</div>
@@ -774,6 +805,7 @@ tbody tr:last-child td{border-bottom:none}
 </div>
 
 <script src="js/datos.js"></script>
+<script src="js/sesion.js"></script>
 <script src="js/sync.js"></script>
 <script src="js/negocio.js"></script>
 <script src="js/ui.js"></script>

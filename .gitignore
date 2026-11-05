@@ -2,3 +2,5 @@ node_modules/
 test-results/
 playwright-report/
 playwright.local.config.js
+# Configuración LOCAL del Firebase de prueba (modo ?prueba=1). Nunca se sube.
+js/firebase-prueba.local.js
