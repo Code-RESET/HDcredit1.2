@@ -380,7 +380,7 @@ function reintentarConexion() {
   // (en modo prueba nunca se cae a la configuración real por defecto)
   let cfg = _cfgNube;
   if (!cfg) {
-    if (MODO_PRUEBA) { toast('Modo prueba sin configuración válida: recarga la página.', 'err'); return; }
+    if (MODO_PRUEBA || !DEFAULT_FB_CONFIG) { toast('Sin configuración válida de la app: recarga la página.', 'err'); return; }
     cfg = DEFAULT_FB_CONFIG;
     const saved = localStorage.getItem('hd_fb');
     if (saved && saved !== 'local') { try { cfg = JSON.parse(saved); } catch(e) {} }

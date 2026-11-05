@@ -31,8 +31,14 @@ const UID_OK = 'uid-ficticio-cobrador';
 const UID_INTRUSO = 'uid-ficticio-intruso';
 const CFG_FICTICIA = { apiKey: 'clave-api-ficticia', authDomain: 'demo-hd-prueba.firebaseapp.com', projectId: 'demo-hd-prueba-ficticio', appId: '1:0:web:0' };
 const CFG_REAL = { apiKey: 'x', authDomain: 'hdcredit12-2c6ba.firebaseapp.com', projectId: 'hdcredit12-2c6ba', appId: '1:1:web:1' };
-// apiKey real (pública, ya incrustada en js/app.js): para probar una configuración mezclada
-const API_KEY_REAL = (fs.readFileSync(path.join(RAIZ, 'js/app.js'), 'utf8').match(/apiKey:\s*"([^"]+)"/) || [])[1];
+// Configuración real (pública) leída de js/config-real.js: para probar
+// configuraciones mezcladas y que las huellas coinciden
+const SRC_REAL = fs.readFileSync(path.join(RAIZ, 'js/config-real.js'), 'utf8');
+const campoReal = k => (SRC_REAL.match(new RegExp(k + ':\\s*"([^"]+)"')) || [])[1];
+const API_KEY_REAL = campoReal('apiKey');
+const PROYECTO_REAL = campoReal('projectId');
+const SENDER_REAL = campoReal('messagingSenderId');
+const APP_ID_REAL = campoReal('appId');
 const COBRO_EN_COLA = { cid: 'c_ficticio_1', qIdx: 0, qKey: '2026-09-15', accion: 'PAGO', nq: 6, creado: '2026-09-15T16:00:00.000Z',
   log: { id: 'h_cola_1', clienteId: 'c_ficticio_1', nombre: 'ZOILA FICTICIA', monto: 1083, qIndex: 0, qKey: '2026-09-15', accion: 'PAGO',
          fecha: '15/9/2026', hora: '10:00:00', ts: '2026-09-15T16:00:00.000Z' } };
@@ -112,9 +118,11 @@ function sdkFalso({ sesion, nube, cred, autorizados, ctl }) {
 
 // prueba: undefined/'falta' (404) | objeto de configuración servido como js/firebase-prueba.local.js
 async function arrancar(page, { ls = {}, sesion = null, nube = {}, sdk = true, prueba, url = '/index.html',
-                                autorizados = [UID_OK], ctl = {}, online = true, sinWebdriver = false } = {}) {
+                                autorizados = [UID_OK], ctl = {}, online = true, sinWebdriver = false, sinConfigReal = false } = {}) {
   const bloqueadas = [];
   await page.route(BLOQUEAR, r => { bloqueadas.push(r.request().url()); r.abort(); });
+  // Sitio de prueba: no se publica js/config-real.js
+  if (sinConfigReal) await page.route('**/js/config-real.js', r => r.fulfill({ status: 404, body: '' }));
   await page.route('**/js/firebase-prueba.local.js', r => {
     if (!prueba || prueba === 'falta') return r.fulfill({ status: 404, body: '' });
     return r.fulfill({ status: 200, contentType: 'application/javascript', body: 'window.HD_FIREBASE_PRUEBA = ' + JSON.stringify(prueba) + ';' });
@@ -374,7 +382,7 @@ test.describe('6. Modo prueba', () => {
 
   test('se niega a iniciar con el projectId real hdcredit12-2c6ba', async ({ page }) => {
     await arrancar(page, { url: URL_PRUEBA, prueba: CFG_REAL, nube: nubeConCliente, sesion: 'normal' });
-    await expect(page.locator('#login-msg')).toContainText('hdcredit12-2c6ba');
+    await expect(page.locator('#login-msg')).toContainText('proyecto REAL');
     await expect(page.locator('#login-msg')).toContainText('se niega');
     await expect(page.locator('#login-form')).toBeHidden();
     const r = await reg(page);
@@ -440,6 +448,80 @@ test.describe('6. Modo prueba', () => {
     await expect(page.locator('#login-msg')).toContainText('datos de la app real');
     expect((await reg(page)).configs).toEqual([]);
     await sinDatos(page);
+  });
+});
+
+test.describe('Configuración real aparte (js/config-real.js)', () => {
+  test('con el archivo, la app publicada funciona igual: usa el proyecto real y entra con login', async ({ page }) => {
+    await arrancar(page, { nube: nubeConCliente });
+    await entrar(page);
+    await expect(page.locator('#login-scr')).toBeHidden();
+    expect((await reg(page)).configs).toEqual([PROYECTO_REAL]);
+    expect(await page.evaluate(() => localStorage.getItem('hd_fb'))).toContain(PROYECTO_REAL); // se guarda como antes
+  });
+
+  test('con el archivo, una configuración guardada sigue teniendo prioridad (igual que antes)', async ({ page }) => {
+    await arrancar(page, { ls: { hd_fb: JSON.stringify(CFG_FICTICIA) }, nube: nubeConCliente, sesion: 'normal' });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    expect((await reg(page)).configs).toEqual(['demo-hd-prueba-ficticio']);
+  });
+
+  test('sin el archivo y sin configuración de prueba: se detiene con un error claro y no conecta a nada', async ({ page }) => {
+    await arrancar(page, { sinConfigReal: true, ls: { hd_fb: JSON.stringify(CFG_FICTICIA), hd_c: [CLI_LOCAL] }, nube: nubeConCliente, sesion: 'normal' });
+    await expect(page.locator('#login-msg')).toContainText('Falta la configuración de la app');
+    await expect(page.locator('#login-form')).toBeHidden();
+    const r = await reg(page);
+    expect(r.configs).toEqual([]);   // ni la guardada ni ninguna otra
+    expect(r.firestore).toBe(0);
+    await sinDatos(page);
+    expect(await page.evaluate(() => DEFAULT_FB_CONFIG)).toBeNull();
+    await page.evaluate(() => reintentarConexion());
+    await expect(page.locator('#toasts')).toContainText('Sin configuración válida');
+    expect((await reg(page)).configs).toEqual([]);
+  });
+
+  test('sin el archivo, el sitio de prueba funciona con su configuración', async ({ page }) => {
+    await arrancar(page, { sinConfigReal: true, prueba: CFG_FICTICIA, nube: nubeConCliente });
+    await expect(page.locator('#login-prueba')).toContainText('MODO PRUEBA');
+    await entrar(page);
+    await expect(page.locator('#login-scr')).toBeHidden();
+    expect((await reg(page)).configs).toEqual(['demo-hd-prueba-ficticio']);
+  });
+
+  test('sin el archivo, la protección sigue reconociendo el proyecto real (por huellas)', async ({ page }) => {
+    const casos = [
+      CFG_REAL,                                                   // projectId real
+      { ...CFG_FICTICIA, apiKey: API_KEY_REAL },                  // apiKey real
+      { ...CFG_FICTICIA, appId: APP_ID_REAL },                    // appId real
+      { ...CFG_FICTICIA, messagingSenderId: SENDER_REAL },        // senderId real
+      { ...CFG_FICTICIA, authDomain: ' ' + PROYECTO_REAL.toUpperCase() + '.firebaseapp.com ' }, // mayúsculas y espacios
+    ];
+    await arrancar(page, { sinConfigReal: true, prueba: CFG_FICTICIA });
+    expect(await page.evaluate(() => window.HD_FIREBASE_REAL)).toBeUndefined();
+    expect(await page.evaluate(c => c.map(esProyectoReal), casos)).toEqual([true, true, true, true, true]);
+    expect(await page.evaluate(c => esProyectoReal(c), CFG_FICTICIA)).toBe(false);
+  });
+
+  test('sin el archivo, un sitio de prueba con la configuración real se niega a iniciar', async ({ page }) => {
+    await arrancar(page, { sinConfigReal: true, url: '/index.html?prueba=1', prueba: CFG_REAL, sesion: 'normal' });
+    await expect(page.locator('#login-msg')).toContainText('se niega');
+    expect((await reg(page)).configs).toEqual([]);
+  });
+
+  test('las huellas del código coinciden con js/config-real.js', async ({ page }) => {
+    await arrancar(page, { sinConfigReal: true, prueba: CFG_FICTICIA });
+    const r = await page.evaluate(v => ({ calc: v.map(x => huella(x.toLowerCase())), codigo: HUELLAS_REAL }),
+      [PROYECTO_REAL, SENDER_REAL, API_KEY_REAL, APP_ID_REAL]);
+    expect(r.calc).toEqual(r.codigo);
+  });
+
+  test('ningún archivo del sitio, salvo js/config-real.js, contiene identificadores reales', () => {
+    const publicados = ['index.html', 'sw.js', 'manifest.json',
+      ...fs.readdirSync(path.join(RAIZ, 'js')).filter(f => f.endsWith('.js') && f !== 'config-real.js' && f !== 'firebase-prueba.local.js').map(f => 'js/' + f)];
+    for (const f of publicados) {
+      const txt = fs.readFileSync(path.join(RAIZ, f), 'utf8');
+      for (const id of [PROYECTO_REAL, SENDER_REAL, API_KEY_REAL]) expect(txt.includes(id), f + ' contiene ' + id).toBe(false);
+    }
   });
 });
 

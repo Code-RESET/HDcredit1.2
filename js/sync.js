@@ -44,7 +44,7 @@ function loadFirebaseSDK(cfg, opts = {}) {
 function _loadFirebaseSDK(cfg, opts, resolve) {
   // Defensa extra: el modo prueba nunca toca el proyecto real
   if (MODO_PRUEBA && esProyectoReal(cfg)) {
-    bloquearInicio('Modo prueba se niega a iniciar: la configuración apunta al proyecto REAL (' + PROYECTO_REAL + ').');
+    bloquearInicio('Modo prueba se niega a iniciar: la configuración apunta al proyecto REAL de HD Crédit.');
     resolve(false);
     return;
   }

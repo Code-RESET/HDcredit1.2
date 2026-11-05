@@ -255,21 +255,12 @@ function initQSel(){
 }
 
 /* ============================================================
-   FIREBASE CONFIG POR DEFECTO (incrustada)
-   Se usa si el navegador no tiene nada guardado en localStorage
-   (limpieza de datos, actualización de Windows/Android, dispositivo
-   nuevo, etc.). Evita depender solo de localStorage, que el sistema
-   operativo o el navegador pueden borrar sin avisar.
+   FIREBASE CONFIG POR DEFECTO: viene de js/config-real.js (solo en la app
+   publicada). Si ese archivo falta (p. ej. el sitio de prueba), es null y
+   la app se detiene con un error en vez de conectarse por accidente.
 ============================================================ */
-const DEFAULT_FB_CONFIG = {
-  apiKey: "AIzaSyA6IW4VCq1j05gHZRQ7l2LGwgsDDwC_JAY",
-  authDomain: "hdcredit12-2c6ba.firebaseapp.com",
-  projectId: "hdcredit12-2c6ba",
-  storageBucket: "hdcredit12-2c6ba.firebasestorage.app",
-  messagingSenderId: "842352004463",
-  appId: "1:842352004463:web:96acdcef130db26e46ac9a",
-  measurementId: "G-1KBSKD2Q27"
-};
+const DEFAULT_FB_CONFIG = (window.HD_FIREBASE_REAL && window.HD_FIREBASE_REAL.apiKey && window.HD_FIREBASE_REAL.projectId)
+  ? window.HD_FIREBASE_REAL : null;
 
 /* ============================================================
    INIT

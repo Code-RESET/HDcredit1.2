@@ -19,7 +19,23 @@
    servidor tiene js/firebase-prueba.local.js. En modo prueba solo se usa
    esa configuración y nunca la real.
 ============================================================ */
-const PROYECTO_REAL = 'hdcredit12-2c6ba';
+// Huellas (hash cyrb53, en minúsculas) de los identificadores del proyecto
+// REAL: projectId, messagingSenderId, apiKey y appId. Así la protección del
+// modo prueba funciona aunque el sitio de prueba no tenga js/config-real.js
+// y sin guardar ahí el identificador real. Una prueba (login.spec.js)
+// verifica que coinciden con js/config-real.js.
+const HUELLAS_REAL = ['5ol327p966', '5tnd291sk5', '2aut3rdueue', '29it6zxbssg'];
+function huella(str) {
+  let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+}
 
 function esHostPrueba(host) {
   return /^hd-credit-prueba(--[a-z0-9-]+)?\.(web\.app|firebaseapp\.com)$/i.test(String(host || ''));
@@ -39,14 +55,18 @@ let _migrandoAnonimo = false;
 
 // ¿La configuración apunta al proyecto real? Se mira cualquier campo:
 // la apiKey/appId deciden a qué Auth va el login, el projectId a qué base.
+// Cada valor se compara entero y por partes (separadas por . : / @), así
+// "hdcredit12-….firebaseapp.com" o "1:<senderId>:web:…" también se reconocen.
 function esProyectoReal(cfg) {
   if (!cfg) return false;
-  const real = (typeof DEFAULT_FB_CONFIG !== 'undefined') ? DEFAULT_FB_CONFIG : {};
-  const huellas = [PROYECTO_REAL, real.apiKey, real.appId, real.messagingSenderId]
-    .filter(Boolean).map(s => String(s).toLowerCase());
+  const real = window.HD_FIREBASE_REAL || null; // solo existe en la app publicada
+  const directas = real ? [real.projectId, real.apiKey, real.appId, real.messagingSenderId]
+    .filter(Boolean).map(s => String(s).toLowerCase()) : [];
   return Object.values(cfg).some(v => {
     const s = String(v || '').toLowerCase().replace(/\s+/g, '');
-    return huellas.some(h => s.includes(h));
+    if (!s) return false;
+    if (directas.some(h => s.includes(h))) return true;
+    return [s, ...s.split(/[.:\/@]+/)].filter(Boolean).some(t => HUELLAS_REAL.includes(huella(t)));
   });
 }
 
@@ -148,7 +168,7 @@ function configPrueba() {
     return null;
   }
   if (esProyectoReal(cfg)) {
-    bloquearInicio('Modo prueba se niega a iniciar: la configuración apunta al proyecto REAL (' + PROYECTO_REAL + ').');
+    bloquearInicio('Modo prueba se niega a iniciar: la configuración apunta al proyecto REAL de HD Crédit.');
     return null;
   }
   if (_marcaEntorno() !== 'prueba' && hayRastrosApp()) {
@@ -164,6 +184,12 @@ function configPrueba() {
 // En modo prueba NUNCA se usa la configuración real ni la guardada.
 async function configNube(saved) {
   if (MODO_PRUEBA) return configPrueba();
+  // Sin js/config-real.js y sin configuración de prueba: se detiene. No se
+  // usa ninguna configuración guardada, para no conectarse por accidente.
+  if (!DEFAULT_FB_CONFIG) {
+    bloquearInicio('Falta la configuración de la app (js/config-real.js) y este sitio no es de prueba. La app se detiene para no conectarse a ningún proyecto por accidente.');
+    return null;
+  }
   let cfg = DEFAULT_FB_CONFIG;
   if (saved && saved !== 'local') {
     try { cfg = JSON.parse(saved); } catch(e) { cfg = DEFAULT_FB_CONFIG; }
