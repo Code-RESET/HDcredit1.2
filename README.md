@@ -8,23 +8,24 @@ La app pide **correo y contraseña** (Firebase Authentication, proveedor "Correo
 
 Todos los usuarios autorizados comparten la ruta `usuarios/compartido/...`. Quién puede leer/escribir lo decide `firestore.rules`: solo los UID de la lista y solo con correo y contraseña (los anónimos se rechazan).
 
-- Sin internet: un teléfono que **ya inició sesión** antes sigue funcionando con su copia local; uno que nunca inició sesión se queda en el login.
-- "Cerrar sesión" (menú lateral) quita los datos de la pantalla; los cobros en cola se quedan guardados en el teléfono.
-- El modo "Solo local" elegido a mano sigue sin login (no usa la nube).
+- **La sesión solo vale si la nube confirma el UID** (una lectura directa al servidor que las reglas solo permiten a los UID de la lista). Una cuenta no autorizada se cierra sola y no ve nada.
+- Sin internet: solo ve la copia del teléfono un UID que la nube **ya confirmó antes en ese teléfono** (`hd_autorizados`). Otra cuenta, o un teléfono sin poder cargar el SDK, no ve nada.
+- "Solo local" se quitó. Un teléfono que lo usaba inicia sesión y pasa por el rescate; sus datos se conservan.
+- Cerrar sesión primero sube los cobros en cola y las altas/ediciones pendientes; si no puede (sin red, rescate pendiente), **no deja salir**. Una sesión anónima de la versión anterior intenta subir lo pendiente y fuerza el rescate antes de cerrarse.
 
-### Modo prueba (`?prueba=1`)
+### Modo prueba
 
 1. Copia `js/firebase-prueba.example.js` como `js/firebase-prueba.local.js` (ignorado por git) y pega la configuración del Firebase **de prueba**.
 2. Abre `http://localhost:4173/index.html?prueba=1` (`npx http-server -p 4173 -c-1 .`).
 
-El modo prueba solo usa ese archivo y **se niega a iniciar** si apunta al proyecto real (`hdcredit12-2c6ba`), si falta el archivo, o si el navegador ya tiene datos de la app real. A la inversa, la app real se niega a conectar en un navegador marcado como de pruebas.
+El modo prueba se activa con `?prueba=1`, en el Hosting de `hd-credit-prueba` (`*.web.app`/`*.firebaseapp.com`), en un navegador ya marcado como de prueba, o si el servidor tiene `js/firebase-prueba.local.js`. Así una app instalada o una URL sin el parámetro **nunca** se conecta al proyecto real. Solo usa ese archivo y **se niega a iniciar** si apunta al proyecto real (projectId, apiKey, appId o senderId), si falta el archivo, o si el navegador ya tiene datos de la app real.
 
 ### Activar en producción (orden seguro)
 
-1. Firebase real → Authentication → habilitar **Correo electrónico/contraseña** y crear los usuarios; anotar sus UID.
-2. Antes de desplegar: en cada teléfono, exportar un **respaldo JSON** y esperar a que no haya cobros en cola.
-3. Desplegar esta versión. La regla actual (`request.auth != null`) también acepta a estos usuarios, así que nada se corta.
-4. Iniciar sesión en cada teléfono y comprobar que sincroniza.
+1. Firebase real → Authentication → habilitar **Correo electrónico/contraseña**, **desactivar el registro de usuarios** (Configuración → Acciones del usuario) y crear los usuarios; anotar sus UID. Mientras la regla siga siendo `request.auth != null`, cualquier cuenta con contraseña pasaría la confirmación: por eso el registro debe estar cerrado.
+2. Antes de desplegar, en cada teléfono con la versión vieja **y con internet**: ver "🟢 Sincronizado", que no haya cobros en cola y exportar un **respaldo JSON**.
+3. Desplegar esta versión. La regla actual acepta a los usuarios con contraseña, así que nada se corta. Al abrirla, cada teléfono sube lo pendiente de su sesión anónima y pasa por el rescate.
+4. Iniciar sesión en cada teléfono, terminar el rescate y comprobar que sincroniza.
 5. Poner los UID reales en `firestore.rules`, probarlas en el simulador de reglas de la consola y **solo entonces** publicarlas.
 6. Deshabilitar el proveedor "Anónimo" y borrar los usuarios anónimos viejos.
 

@@ -71,6 +71,8 @@ function firestoreFalsoInit() {
     }
     const DBf = {
       enablePersistence: () => Promise.resolve(),
+      // Escrituras del SDK pendientes: sin señal (commit 'hang') nunca terminan
+      waitForPendingWrites: () => (ctl.commit === 'hang' ? new Promise(() => {}) : Promise.resolve()),
       collection: n => colRef(n),
       batch: () => {
         const ops = [];
@@ -105,6 +107,8 @@ function firestoreFalsoInit() {
 async function arrancar(page, { reloj, ls = { hd_fb: 'local', hd_local_manual: '1' }, firebaseFalso = false, nube = {}, online = true, esperarLoader = true } = {}) {
   const bloqueadas = [];
   await page.route(FIREBASE_REAL, route => { bloqueadas.push(route.request().url()); route.abort(); });
+  // Sitio normal: sin configuración de prueba (si no, se forzaría el modo prueba)
+  await page.route('**/js/firebase-prueba.local.js', route => route.fulfill({ status: 404, body: '' }));
   if (reloj) await page.clock.setFixedTime(new Date(reloj));
   await page.addInitScript(ls => {
     if (sessionStorage.getItem('__init')) return;
@@ -664,8 +668,9 @@ test.describe('4. rescate de datos locales', () => {
   }
   const nube = page => page.evaluate(() => Object.fromEntries(window.__fs.store));
   const marcarTodo = page => page.evaluate(() => document.querySelectorAll('#resc-comparacion input[type=checkbox]').forEach(i => { i.checked = true; }));
-  // Antes del login solo se inicia Auth; lo que importa es que Firestore no se use
-  const sdkIniciado = page => page.evaluate(() => window.__fsUsos || 0);
+  // Antes de confirmar el rescate solo se hace la lectura que confirma el
+  // acceso; lo que importa es que no se sincronice ni se escriba nada
+  const sdkIniciado = page => page.evaluate(() => window.__fs ? (window.__fs.log.listeners || 0) + window.__fs.log.commits.length : 0);
 
   test('[arranque] teléfono heredado: no conecta antes de descargar y confirmar', async ({ page }) => {
     ctx = await arrancar(page, { ls: LEGADO, firebaseFalso: true, nube: NUBE_BASE });
@@ -775,9 +780,13 @@ test.describe('4. rescate de datos locales', () => {
 
   test('[arranque][permite-bloqueo] falla temporal: no guarda modo local y protege lo cobrado', async ({ page }) => {
     const cfg = JSON.stringify({ apiKey: 'falsa', projectId: 'demo-prueba' });
-    // sin SDK falso: la carga real se bloquea. hd_sesion: este teléfono ya
-    // había iniciado sesión antes (sin eso se queda en el login; ver login.spec.js)
-    ctx = await arrancar(page, { ls: { hd_fb: cfg, hd_sesion: 'uid-ficticio-cobrador', hd_c: [{ ...CLIENTE }] } });
+    // Sesión confirmada por la nube (falsa); luego la conexión falla a media
+    // sesión (p. ej. reconectar con red mala) y se trabaja en local temporal.
+    // Un SDK que NO carga al abrir ya no muestra datos (ver login.spec.js).
+    ctx = await arrancar(page, { ls: { hd_fb: cfg }, firebaseFalso: true, nube: { ['usuarios/compartido/clientes/c_prueba_1']: { ...CLIENTE } } });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    await expect.poll(() => page.evaluate(() => (JSON.parse(localStorage.getItem('hd_c') || '[]')).length)).toBe(1);
+    await page.evaluate(() => modoLocalTemporal('Firebase tardó demasiado en responder.'));
     await expect(page.locator('#banner-sinsync')).toBeVisible({ timeout: 15000 });
     await expect(page.locator('#sync-lbl')).toContainText('SIN SINCRONIZAR');
     expect(await page.evaluate(() => localStorage.getItem('hd_fb'))).toBe(cfg); // NO quedó 'local'

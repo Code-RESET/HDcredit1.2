@@ -241,7 +241,7 @@ tbody tr:last-child td{border-bottom:none}
 .login-prueba{background:var(--warn);color:#000;font-weight:800;font-size:.78rem;padding:6px 10px;border-radius:var(--radius);margin-bottom:14px;text-align:center}
 #login-msg{font-size:.82rem;margin-top:10px;color:var(--danger);white-space:pre-line}
 #login-msg[data-tipo="info"]{color:var(--muted)}
-body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.sin-sesion #banner-sinsync{visibility:hidden}
+body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.sin-sesion #rev-badge,body.sin-sesion #banner-sinsync{visibility:hidden}
 
 /* FIREBASE CONFIG */
 #fb-cfg{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:6000;padding:20px}
@@ -333,6 +333,7 @@ body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.si
       <button class="btn btn-p" id="login-btn" type="submit" disabled><i class="fas fa-sign-in-alt"></i> Entrar</button>
     </form>
     <p id="login-msg" data-tipo="info">Cargando…</p>
+    <button class="btn btn-s" id="login-reintentar" type="button" onclick="location.reload()" hidden style="margin-top:10px"><i class="fas fa-sync"></i> Reintentar</button>
   </div>
 </div>
 
@@ -403,9 +404,8 @@ body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.si
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
       <button class="btn btn-p" onclick="connectFirebase()"><i class="fas fa-fire"></i> Conectar Firebase</button>
-      <button class="btn btn-s" onclick="goLocal()"><i class="fas fa-laptop"></i> Solo local (este dispositivo)</button>
+      <button class="btn btn-s" onclick="document.getElementById('fb-cfg').style.display='none'">Cerrar</button>
     </div>
-    <p style="font-size:.73rem;color:var(--muted);margin-top:10px">Modo local: datos guardados en este navegador. No se sincronizan entre dispositivos.</p>
   </div>
 </div>
 

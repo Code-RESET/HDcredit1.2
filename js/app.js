@@ -304,8 +304,15 @@ function init(){
 // En modo nube, primero se inicia sesión: antes de eso no se carga ni se
 // muestra ningún dato (ni de la nube ni la copia local).
 async function arrancarConexion(saved){
-  // 1. Modo local elegido a mano (sin nube): se respeta. No aplica al modo prueba.
-  if (!MODO_PRUEBA && saved === 'local' && localStorage.getItem('hd_local_manual') === '1') { ocultarLogin(); loadLocal(); return; }
+  // 1. "Solo local" ya no existe para los usuarios: un teléfono que lo usaba
+  //    inicia sesión y pasa por el rescate (paso 2), sin perder sus datos.
+  //    Solo las pruebas automáticas (navegador controlado por Playwright,
+  //    navigator.webdriver) siguen corriendo en local, sin Firebase.
+  if (navigator.webdriver === true && !MODO_PRUEBA && saved === 'local' && localStorage.getItem('hd_local_manual') === '1') {
+    _modoLocalAutomatizado = true; ocultarLogin(); loadLocal(); return;
+  }
+  // El sitio de prueba se reconoce aunque falte ?prueba=1 (app instalada)
+  await detectarEntorno();
   const cfg = await configNube(saved);
   if (!cfg) return; // bloqueado: se queda en la pantalla de aviso, sin datos
   _cfgNube = cfg;
@@ -335,7 +342,7 @@ window.waCliente=waCliente; window.waAll=waAll;
 window.filterC=filterC; window.filterH=filterH;
 window.renderCL=renderCL; window.gv=gv; window.toggleSB=toggleSB;
 window.doExport=doExport; window.doExportXLSX=doExportXLSX; window.doExportJSON=doExportJSON; window.doImportJSON=doImportJSON;
-window.connectFirebase=connectFirebase; window.goLocal=goLocal;
+window.connectFirebase=connectFirebase;
 window.om=om; window.cm=cm;
 window.initPago=initPago; window.undoLastPago=undoLastPago;
 window.switchMorososTab=switchMorososTab; window.renderMorosos=renderMorosos;

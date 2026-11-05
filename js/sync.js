@@ -35,9 +35,9 @@ function connectFirebase() {
 
 // opts.rescate: conexión para el rescate — no arranca la sincronización y,
 // si falla, no cambia de modo (el rescate decide). Devuelve true/false.
-// opts.soloSesion: carga el SDK y espera el login; no sincroniza ni carga
-// datos. Si falla sin una sesión previa en este teléfono, se queda en la
-// pantalla de login (no se muestra nada).
+// opts.soloSesion: carga el SDK, espera el login y la confirmación de la
+// nube; no sincroniza ni carga datos. Si el SDK no carga, se queda en la
+// pantalla de login (sin SDK no se sabe quién es el usuario: no se muestra nada).
 function loadFirebaseSDK(cfg, opts = {}) {
   return new Promise(resolve => _loadFirebaseSDK(cfg, opts, resolve));
 }
@@ -51,11 +51,9 @@ function _loadFirebaseSDK(cfg, opts, resolve) {
   const fallar = (msg) => {
     reportarError('Conectar Firebase', new Error(msg));
     if (opts.soloSesion) {
-      // Sin internet al abrir: solo un teléfono que YA inició sesión antes
-      // sigue (con su copia local); uno sin sesión se queda en el login.
-      if (localStorage.getItem('hd_sesion')) { ocultarLogin(); resolve(true); return; }
-      mostrarLogin(msg + ' Se necesita internet para iniciar sesión la primera vez. Recarga la página para reintentar.', 'err');
+      mostrarLogin(msg + ' Sin el inicio de sesión no se muestran datos. Conéctate a internet y toca Reintentar.', 'err');
       formularioLogin(false);
+      botonReintentar(true);
       resolve(false);
       return;
     }
@@ -114,27 +112,34 @@ function _loadFirebaseSDK(cfg, opts, resolve) {
 // y las reglas de Firestore (firestore.rules: solo UID autorizados).
 const UID_COMPARTIDO = 'compartido';
 let _persistenciaPedida = false;
+let _hayEscriturasPendientes = false; // último estado conocido del SDK (snap.metadata)
+
+// Abre Firestore una sola vez. Persistencia offline: la app sigue
+// funcionando sin internet y lo que se haga sin conexión sube solo al
+// volver la señal. Se pide antes de cualquier otro uso de Firestore.
+function abrirFirestore() {
+  if (!DB) DB = firebase.firestore();
+  if (!_persistenciaPedida) {
+    _persistenciaPedida = true;
+    DB.enablePersistence({synchronizeTabs: true}).catch(e => {
+      // Sin persistencia, un cobro hecho sin señal se pierde al cerrar la app
+      reportarError('Persistencia offline no disponible', e);
+    });
+  }
+  return DB;
+}
 
 async function initFB(cfg, opts = {}) {
   try {
     if (!firebase.apps.length) firebase.initializeApp(cfg);
-    // Nada de Firestore (ni su copia offline) antes de tener sesión
+    // Nada de datos antes de tener sesión Y de que la nube confirme el UID
     await asegurarSesion();
+    abrirFirestore();
+    if (!(await verificarAcceso())) return false;
     if (opts.soloSesion) return true;
-    DB = firebase.firestore();
     USE_FB = true;
     document.getElementById('fb-cfg').style.display = 'none';
     CURRENT_UID = UID_COMPARTIDO;
-    // Persistencia offline: la app sigue funcionando sin internet (lee de la
-    // copia local en el dispositivo) y los cobros que se hagan sin conexión
-    // se guardan en cola y se suben solos en cuanto vuelve la señal
-    if (!_persistenciaPedida) {
-      _persistenciaPedida = true;
-      DB.enablePersistence({synchronizeTabs: true}).catch(e => {
-        // Sin persistencia, un cobro hecho sin señal se pierde al cerrar la app
-        reportarError('Persistencia offline no disponible', e);
-      });
-    }
     // El estado real (sincronizado / local / subiendo) lo decide startFBSync()
     // a partir de snap.metadata, que refleja la conexión real con Firestore
     // (más confiable que navigator.onLine, que solo mira la red del dispositivo)
@@ -194,6 +199,7 @@ function startFBSync() {
     // metadata.fromCache: se está mostrando la copia local (sin red);
     // metadata.hasPendingWrites: hay cobros hechos aquí que aún no suben
     const enCola = leerCola().length;
+    _hayEscriturasPendientes = !!snap.metadata.hasPendingWrites;
     if (snap.metadata.fromCache) setSyncLbl('local');
     else if (snap.metadata.hasPendingWrites || enCola) setSyncLbl('pendiente');
     else setSyncLbl('ok');
@@ -206,11 +212,7 @@ function startFBSync() {
   }, err => {
     reportarError('Sincronización de acreditados', err);
     setSyncLbl('error');
-    if (err && err.code === 'permission-denied') {
-      const uid = (_usuario && _usuario.uid) || '?';
-      toast('Este usuario no está autorizado en las reglas (UID: ' + uid + ').', 'err');
-      return;
-    }
+    if (err && err.code === 'permission-denied') { accesoRevocado(); return; }
     if (Date.now() - _errToastAt > 30000) { _errToastAt = Date.now(); toast('Error de sincronización: ' + err.message, 'err'); }
   });
   // En vivo solo se sincroniza lo reciente (ventana de tiempo, no un conteo
@@ -229,18 +231,20 @@ function startFBSync() {
     renderDash();
   }, err => {
     reportarError('Sincronización de historial', err);
+    if (err && err.code === 'permission-denied') { accesoRevocado(); return; }
     if (Date.now() - _errToastAt > 30000) { _errToastAt = Date.now(); toast('Error de sincronización: ' + err.message, 'err'); }
   });
 }
 
-// Modo local ELEGIDO por el usuario (botón "Solo local"): se guarda como
-// permanente y se marca como manual para distinguirlo de un fallo.
-function goLocal() {
-  localStorage.setItem('hd_fb', 'local');
-  localStorage.setItem('hd_local_manual', '1');
-  document.getElementById('fb-cfg').style.display = 'none';
-  loadLocal();
-}
+// (El modo "Solo local" elegido a mano se quitó: entraba sin login. Un
+// teléfono que lo usaba ahora inicia sesión y pasa por el rescate; sus
+// datos locales se conservan.)
+
+// Datos (nube o copia local) solo con un acceso confirmado. Única
+// excepción: las pruebas automáticas (navigator.webdriver), que corren el
+// modo local sin Firebase — ver arrancarConexion().
+let _modoLocalAutomatizado = false;
+function puedeVerDatos() { return _autorizado || _modoLocalAutomatizado; }
 
 // Modo local por FALLO (red lenta, SDK que no carga…): solo por esta
 // sesión. No se guarda 'local'; el siguiente arranque reintenta la nube.
@@ -345,6 +349,12 @@ function syncAlertas() {
 }
 
 function loadLocal() {
+  // Candado: la copia del teléfono solo se muestra con un acceso confirmado
+  if (!puedeVerDatos()) {
+    clientes = []; historial = [];
+    mostrarLogin('No se puede mostrar la copia de este teléfono sin un acceso confirmado.', 'err');
+    return;
+  }
   try { clientes = JSON.parse(localStorage.getItem('hd_c') || '[]'); }
   catch(e) { clientes = []; toast('⚠️ Datos corruptos en almacenamiento local — se inició vacío. Restaura un respaldo JSON.', 'err'); }
   try { historial = JSON.parse(localStorage.getItem('hd_h') || '[]'); }
@@ -380,70 +390,4 @@ function saveLocal() {
   }
 }
 
-/* ============================================================
-   SEED DATA (from your Excel file)
-============================================================ */
-function xlDate(n) {
-  if (!n) return '';
-  const d = new Date(Math.round((n - 25569) * 86400 * 1000));
-  return d.toISOString().split('T')[0];
-}
-
-function seedData() {
-  const raw = [
-    {n:'IVON',m:8000,pq:1067,nq:12,ini:45976,pg:12,s:0,a:''},
-    {n:'E.NANCY',m:5000,pq:667,nq:12,ini:45976,pg:12,s:0,a:''},
-    {n:'YISEL',m:8000,pq:1200,nq:10,ini:46021,pg:10,s:0,a:''},
-    {n:'TREJO',m:6000,pq:800,nq:12,ini:46006,pg:12,s:0,a:''},
-    {n:'GABI',m:4000,pq:604,nq:10,ini:45991,pg:10,s:0,a:''},
-    {n:'H/TERE',m:5000,pq:751,nq:10,ini:46006,pg:10,s:0,a:''},
-    {n:'JOSE LUIS',m:5000,pq:900,nq:8,ini:46127,pg:2,s:5400,a:'ATRASADO'},
-    {n:'ANDREA',m:4000,pq:601,nq:10,ini:46037,pg:10,s:0,a:''},
-    {n:'SAHIRA',m:5000,pq:667,nq:12,ini:46037,pg:8,s:2668,a:'ATRASADO'},
-    {n:'SAM',m:8000,pq:1067,nq:12,ini:46037,pg:8,s:4268,a:'ATRASADO'},
-    {n:'JASIEL',m:10000,pq:1501,nq:10,ini:46052,pg:8,s:3002,a:''},
-    {n:'PERLA 12Q',m:12000,pq:1600,nq:12,ini:46052,pg:10,s:3200,a:''},
-    {n:'JESUS 71',m:5000,pq:751,nq:10,ini:46052,pg:7,s:2253,a:''},
-    {n:'LORENA',m:15000,pq:2001,nq:12,ini:46052,pg:7,s:10005,a:''},
-    {n:'ERIKA',m:15000,pq:2001,nq:12,ini:46068,pg:6,s:12006,a:'ATRASADO'},
-    {n:'VERONICA',m:5000,pq:751,nq:10,ini:46068,pg:7,s:2253,a:''},
-    {n:'ESTELA',m:5000,pq:667,nq:12,ini:46068,pg:6,s:4002,a:'ATRASADO'},
-    {n:'MARI TERE',m:3000,pq:650,nq:6,ini:46068,pg:5,s:650,a:'ATRASADO'},
-    {n:'DIOSDADO',m:10000,pq:1334,nq:12,ini:46068,pg:6,s:8004,a:'ATRASADO'},
-    {n:'JULIA',m:5000,pq:667,nq:12,ini:46081,pg:5,s:4669,a:'ATRASADO'},
-    {n:'VIVIANA',m:5000,pq:667,nq:12,ini:46081,pg:5,s:4669,a:'ATRASADO'},
-    {n:'PAULINA',m:5000,pq:751,nq:10,ini:46081,pg:4,s:4506,a:'ATRASADO'},
-    {n:'OLGA',m:2000,pq:467,nq:6,ini:46081,pg:5,s:467,a:'ATRASADO'},
-    {n:'JOSE LUIS 2',m:5000,pq:900,nq:8,ini:46096,pg:4,s:3600,a:'ATRASADO'},
-    {n:'GISEL',m:5000,pq:1083,nq:6,ini:46111,pg:3,s:3249,a:'ATRASADO'},
-    {n:'VANE',m:7000,pq:1050,nq:10,ini:46111,pg:3,s:7350,a:'ATRASADO'},
-    {n:'PERLA 7K',m:7000,pq:934,nq:12,ini:46111,pg:4,s:7472,a:''},
-    {n:'ROXANA',m:6000,pq:800,nq:12,ini:46127,pg:2,s:8000,a:'ATRASADO'},
-    {n:'E.NANCY 2',m:4000,pq:722,nq:8,ini:46127,pg:2,s:4332,a:'ATRASADO'},
-    {n:'JAZ',m:4000,pq:534,nq:12,ini:46127,pg:2,s:5340,a:'ATRASADO'},
-    {n:'YISEL 2',m:8000,pq:1200,nq:10,ini:46142,pg:1,s:10800,a:'ATRASADO'},
-    {n:'TERE',m:7000,pq:1264,nq:8,ini:46142,pg:1,s:8848,a:'ATRASADO'},
-    {n:'ABRIL',m:5000,pq:900,nq:8,ini:46142,pg:1,s:6300,a:'ATRASADO'},
-    {n:'JOSE LUIS 3',m:4000,pq:722,nq:8,ini:46143,pg:1,s:5054,a:'ATRASADO'},
-    {n:'ANGEL C.',m:15000,pq:2601,nq:8,ini:46143,pg:1,s:18207,a:'ATRASADO'},
-    {n:'MARI TERE 2',m:5000,pq:1083,nq:6,ini:46157,pg:0,s:6498,a:'ATRASADO'},
-    {n:'DANIEL',m:6000,pq:800,nq:12,ini:46157,pg:0,s:9600,a:'ATRASADO'},
-    {n:'LUISA',m:6000,pq:1300,nq:6,ini:46157,pg:0,s:7800,a:'ATRASADO'},
-    {n:'TREJO 2',m:8000,pq:1067,nq:12,ini:46172,pg:0,s:12804,a:''},
-    {n:'MAMA DE SAM',m:8000,pq:1067,nq:12,ini:46172,pg:0,s:12804,a:''},
-    {n:'ANDREA 2',m:6000,pq:800,nq:12,ini:46172,pg:0,s:9600,a:''},
-    {n:'NAYE',m:6000,pq:800,nq:12,ini:46172,pg:0,s:9600,a:''},
-    {n:'JESY',m:4000,pq:722,nq:8,ini:0,pg:0,s:5776,a:''},
-    {n:'H/TERE 2',m:6000,pq:900,nq:10,ini:46172,pg:0,s:9000,a:''},
-  ];
-  clientes = raw.map((r, i) => ({
-    id: 'c_' + i + '_' + Date.now(),
-    nombre: r.n, monto: r.m, pq: r.pq, nq: r.nq,
-    inicio: xlDate(r.ini), pagadas: r.pg, saldo: r.s,
-    alerta: r.a, telefono: '', notas: '',
-    pagos: Array(r.nq).fill(false).map((_,j) => j < r.pg),
-    createdAt: new Date().toISOString()
-  }));
-  saveLocal();
-}
 
