@@ -313,14 +313,17 @@ async function arrancarConexion(saved){
   // 2. Modo local heredado (versiones anteriores lo guardaban solo al
   //    fallar la red) o cambios hechos en modo local temporal: rescate
   //    obligatorio antes de reconectar — si hay algo que rescatar.
+  //    Lo mismo si venía de otro proyecto: sus datos no se reemplazan ni se
+  //    suben sin que el usuario los revise.
   const pendiente = localStorage.getItem('hd_rescate_pendiente') === '1';
-  if ((saved === 'local' || pendiente) && hayDatosLocales()) {
+  const estadoGuardada = estadoConfigGuardada(saved);
+  if ((saved === 'local' || pendiente || estadoGuardada === 'ajena') && hayDatosLocales()) {
     localStorage.setItem('hd_rescate_pendiente', '1');
     iniciarRescate(cfg);
     return;
   }
   // 3. Normal: conectar a la nube
-  if (!MODO_PRUEBA && (!saved || saved === 'local')) localStorage.setItem('hd_fb', JSON.stringify(cfg));
+  if (!MODO_PRUEBA && estadoGuardada !== 'real') localStorage.setItem('hd_fb', JSON.stringify(cfg));
   loadFirebaseSDK(cfg);
 }
 
@@ -348,3 +351,5 @@ window.borrarCopiasDescargadas=borrarCopiasDescargadas;
 window.abrirRevision=abrirRevision; window.reintentarRevision=reintentarRevision; window.descartarRevision=descartarRevision;
 
 init();
+// Al final: si algo falló antes, index.html lo detecta y avisa.
+window.HD_APP_VERSION = '20261105';

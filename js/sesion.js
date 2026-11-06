@@ -143,8 +143,12 @@ function _cargarScript(src) {
 // Si el servidor tiene la configuración de prueba, este sitio ES de prueba:
 // se fuerza el modo prueba aunque falte ?prueba=1 (app instalada, enlace
 // sin el parámetro). En producción ese archivo no existe (ignorado por git).
+// Con límite de espera: con señal muy mala, la petición no debe trabar el login.
 async function detectarEntorno() {
-  try { await _cargarScript('js/firebase-prueba.local.js'); } catch(e) { /* no existe: sitio normal */ }
+  await Promise.race([
+    _cargarScript('js/firebase-prueba.local.js').catch(() => { /* no existe: sitio normal */ }),
+    new Promise(r => setTimeout(r, 8000)),
+  ]);
   if (window.HD_FIREBASE_PRUEBA) MODO_PRUEBA = true;
   return MODO_PRUEBA;
 }
@@ -180,8 +184,19 @@ function configPrueba() {
   return cfg;
 }
 
+// ¿Qué hay guardado en hd_fb? 'real' (el proyecto de js/config-real.js),
+// 'ajena' (otro proyecto) o 'ninguna' (vacío, 'local' o inválido).
+function estadoConfigGuardada(saved) {
+  if (!saved || saved === 'local') return 'ninguna';
+  let cfg = null;
+  try { cfg = JSON.parse(saved); } catch(e) { return 'ninguna'; }
+  if (!cfg || !cfg.projectId) return 'ninguna';
+  return DEFAULT_FB_CONFIG && cfg.projectId === DEFAULT_FB_CONFIG.projectId ? 'real' : 'ajena';
+}
+
 // Configuración con la que se conecta esta sesión. null = no conectar.
 // En modo prueba NUNCA se usa la configuración real ni la guardada.
+// En producción siempre es js/config-real.js: hd_fb nunca decide el proyecto.
 async function configNube(saved) {
   if (MODO_PRUEBA) return configPrueba();
   // Sin js/config-real.js y sin configuración de prueba: se detiene. No se
@@ -190,11 +205,7 @@ async function configNube(saved) {
     bloquearInicio('Falta la configuración de la app (js/config-real.js) y este sitio no es de prueba. La app se detiene para no conectarse a ningún proyecto por accidente.');
     return null;
   }
-  let cfg = DEFAULT_FB_CONFIG;
-  if (saved && saved !== 'local') {
-    try { cfg = JSON.parse(saved); } catch(e) { cfg = DEFAULT_FB_CONFIG; }
-  }
-  return cfg;
+  return DEFAULT_FB_CONFIG;
 }
 
 /* ---------- Autorización confirmada por la nube ---------- */
@@ -279,6 +290,8 @@ async function accesoRevocado() {
 function asegurarSesion() {
   if (_esperaSesion) return _esperaSesion;
   formularioLogin(true);
+  const aviso = document.getElementById('login-msg');
+  if (aviso && aviso.textContent.trim() === 'Cargando…') avisoLogin(''); // el formulario ya está listo
   pintarMensajePendiente();
   _esperaSesion = new Promise(resolve => {
     let listo = false;
@@ -306,6 +319,15 @@ function asegurarSesion() {
 // SIEMPRE por el rescate al entrar. Nada se borra.
 async function migrarSesionAnonima() {
   formularioLogin(false);
+  // Sin internet no se podría iniciar sesión con correo: cerrar la sesión
+  // anónima ahora solo dejaría al usuario fuera. Se espera a tener conexión.
+  if (!navigator.onLine) {
+    if (hayDatosLocales()) { try { localStorage.setItem('hd_rescate_pendiente', '1'); } catch(e) {} }
+    avisoLogin('Sin internet: para pasar al nuevo inicio de sesión se necesita conexión. Tu sesión anterior y lo guardado en este teléfono se conservan. Conéctate y toca Reintentar.');
+    botonReintentar(true);
+    _migrandoAnonimo = false;
+    return;
+  }
   avisoLogin('Guardando lo pendiente de la versión anterior…', 'info');
   let subido = false;
   try {
@@ -326,7 +348,7 @@ function _mensajeErrorLogin(e) {
   if (/invalid-email/.test(c)) return 'El correo no es válido.';
   if (/too-many-requests/.test(c)) return 'Demasiados intentos. Espera unos minutos.';
   if (/user-disabled/.test(c)) return 'Este usuario está desactivado.';
-  if (/network-request-failed/.test(c)) return 'Sin internet: se necesita conexión para iniciar sesión.';
+  if (/network-request-failed/.test(c)) return 'Sin internet: se necesita conexión para iniciar sesión. Lo guardado en este teléfono se conserva.';
   if (/operation-not-allowed/.test(c)) return 'El acceso con correo y contraseña no está habilitado en este proyecto.';
   return 'No se pudo iniciar sesión' + (c ? ' (' + c + ')' : '') + '.';
 }
@@ -405,18 +427,44 @@ async function pendientesQueBloqueanSalida() {
   return null;
 }
 
+// ¿Se puede hablar con la nube ahora? navigator.onLine solo mira la red del
+// teléfono (puede tener Wi-Fi sin internet), así que se pregunta al servidor.
+async function nubeAlcanzable() {
+  if (!navigator.onLine) return false;
+  if (!DB) return true;
+  try {
+    const q = DB.collection('usuarios').doc(UID_COMPARTIDO).collection('clientes').limit(1);
+    await conTiempoLimite(q.get({ source: 'server' }), 5000, 'La nube no respondió');
+    return true;
+  } catch(e) {
+    return !!(e && e.code === 'permission-denied'); // respondió, aunque negó
+  }
+}
+
+let _revisandoSalida = false;
 async function cerrarSesion() {
-  if (_cerrando) return;
-  const motivo = await pendientesQueBloqueanSalida();
+  if (_cerrando || _revisandoSalida) return;
+  _revisandoSalida = true;
+  let motivo, conNube;
+  try {
+    toast('Revisando lo pendiente antes de salir…', 'wrn');
+    motivo = await pendientesQueBloqueanSalida();
+    if (!motivo) conNube = await nubeAlcanzable();
+  } finally {
+    _revisandoSalida = false;
+  }
   if (motivo) {
     toast('No se cerró la sesión. ' + motivo, 'err');
     alert('No se puede cerrar sesión todavía.\n\n' + motivo);
     return;
   }
   const rev = typeof leerRevision === 'function' ? leerRevision().length : 0;
-  const aviso = (rev ? `Hay ${rev} cobro(s) por revisar; se quedan guardados en este teléfono.\n\n` : '') + '¿Cerrar sesión en este teléfono?';
+  const aviso = (conNube ? '' : '⚠️ No hay conexión con la nube. Si cierras sesión ahora, NO podrás volver a entrar hasta tener internet. Lo guardado en este teléfono no se borra.\n\n')
+    + (rev ? `Hay ${rev} cobro(s) por revisar; se quedan guardados en este teléfono.\n\n` : '')
+    + '¿Cerrar sesión en este teléfono?';
   if (!confirm(aviso)) return;
   _cerrando = true;
+  if (!conNube) _mensajeTrasRecarga('Cerraste sesión sin internet. Para volver a entrar necesitas conexión. Lo guardado en este teléfono se conserva.');
   _quitarDatosDePantalla();
   mostrarLogin('', 'info');
   try { await firebase.auth().signOut(); } catch(e) { reportarError('Cerrar sesión', e); }

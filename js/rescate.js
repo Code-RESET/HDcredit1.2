@@ -382,8 +382,6 @@ function reintentarConexion() {
   if (!cfg) {
     if (MODO_PRUEBA || !DEFAULT_FB_CONFIG) { toast('Sin configuración válida de la app: recarga la página.', 'err'); return; }
     cfg = DEFAULT_FB_CONFIG;
-    const saved = localStorage.getItem('hd_fb');
-    if (saved && saved !== 'local') { try { cfg = JSON.parse(saved); } catch(e) {} }
   }
   if (localStorage.getItem('hd_rescate_pendiente') === '1' && hayDatosLocales()) { iniciarRescate(cfg); return; }
   loadFirebaseSDK(cfg);

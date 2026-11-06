@@ -11,7 +11,12 @@ Todos los usuarios autorizados comparten la ruta `usuarios/compartido/...`. Qui�
 - **La sesión solo vale si la nube confirma el UID** (una lectura directa al servidor que las reglas solo permiten a los UID de la lista). Una cuenta no autorizada se cierra sola y no ve nada.
 - Sin internet: solo ve la copia del teléfono un UID que la nube **ya confirmó antes en ese teléfono** (`hd_autorizados`). Otra cuenta, o un teléfono sin poder cargar el SDK, no ve nada.
 - "Solo local" se quitó. Un teléfono que lo usaba inicia sesión y pasa por el rescate; sus datos se conservan.
-- Cerrar sesión primero sube los cobros en cola y las altas/ediciones pendientes; si no puede (sin red, rescate pendiente), **no deja salir**. Una sesión anónima de la versión anterior intenta subir lo pendiente y fuerza el rescate antes de cerrarse.
+- Cerrar sesión primero sube los cobros en cola y las altas/ediciones pendientes; si no puede (sin red, rescate pendiente), **no deja salir**. Sin pendientes pero sin conexión con la nube, avisa antes de salir que no se podrá volver a entrar hasta tener internet. Una sesión anónima de la versión anterior intenta subir lo pendiente y fuerza el rescate antes de cerrarse; sin internet se conserva hasta tener conexión.
+- En producción el proyecto siempre sale de `js/config-real.js`. Un `hd_fb` guardado no lo cambia ni se puede pegar otra configuración; si apuntaba a otro proyecto y el teléfono tiene datos, pasan por el rescate.
+
+### Publicar una versión
+
+Sube el mismo número de versión en `sw.js` (`VERSION`), `index.html` (`HD_VERSION` y los `?v=` de los scripts) y `js/app.js` (`HD_APP_VERSION`). Así el HTML y el JS de versiones distintas no se mezclan; si aun así pasa o un script no carga, la app lo avisa y ofrece Reintentar. Una prueba comprueba que los números coinciden.
 
 ### Modo prueba
 
@@ -26,7 +31,7 @@ El modo prueba se activa con `?prueba=1`, en el Hosting de `hd-credit-prueba` (`
 2. Antes de desplegar, en cada teléfono con la versión vieja **y con internet**: ver "🟢 Sincronizado", que no haya cobros en cola y exportar un **respaldo JSON**.
 3. Desplegar esta versión. La regla actual acepta a los usuarios con contraseña, así que nada se corta. Al abrirla, cada teléfono sube lo pendiente de su sesión anónima y pasa por el rescate.
 4. Iniciar sesión en cada teléfono, terminar el rescate y comprobar que sincroniza.
-5. Poner los UID reales en `firestore.rules`, probarlas en el simulador de reglas de la consola y **solo entonces** publicarlas.
+5. `firestore.rules` ya tiene los UID reales: probarlas en el simulador de reglas de la consola y **solo entonces** publicarlas en el proyecto real (nunca en `hd-credit-prueba`).
 6. Deshabilitar el proveedor "Anónimo" y borrar los usuarios anónimos viejos.
 
 ## Modo offline

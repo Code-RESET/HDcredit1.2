@@ -5,9 +5,9 @@ rules_version = '2';
 // - Los usuarios anónimos (y cualquier otro proveedor) se rechazan.
 // - Todo lo que no esté listado abajo queda cerrado.
 //
-// AHORA: lista con el UID del Firebase de PRUEBA (hd-credit-prueba).
+// AHORA: lista con los UID REALES. No publicar en hd-credit-prueba.
 // NO publicar en el proyecto real hasta seguir el orden del README
-// (sección "Login con correo y contraseña") y poner ahí los UID reales.
+// (sección "Login con correo y contraseña").
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -15,7 +15,8 @@ service cloud.firestore {
       return request.auth != null
         && request.auth.token.firebase.sign_in_provider == 'password'
         && request.auth.uid in [
-          'ZknvkenxXEgWugfxWbt3GnX7Fp53'  // usuario de prueba
+          'R3rdDFisDjQrkLqnt1LtpS848uB2',
+          'nXbh0hlxW1hu757DCQRZKgPcvDm2'
         ];
     }
 

@@ -1,36 +1,12 @@
 /* ============================================================
    FIREBASE (lazy load)
 ============================================================ */
+// La configuración es fija: js/config-real.js en producción y
+// firebase-prueba.local.js en modo prueba. No se acepta una pegada a mano.
 function connectFirebase() {
-  const raw = document.getElementById('fb-input').value.trim();
-  let cfg;
-  try {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) { toast('No se encontró configuración válida', 'err'); return; }
-    let json = match[0];
-    // Unquoted keys: apiKey: => "apiKey":
-    json = json.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
-    // Curly/smart quotes => straight quotes
-    json = json.replace(/[“”„‟‘’]/g, '"');
-    // Trailing commas
-    json = json.replace(/,\s*}/g, '}');
-    cfg = JSON.parse(json);
-    if (!cfg.apiKey || !cfg.projectId) { toast('Falta apiKey o projectId', 'err'); return; }
-  } catch(e) {
-    toast('Error: ' + e.message, 'err'); return;
-  }
-  // En modo prueba la configuración sale SOLO de firebase-prueba.local.js
-  if (MODO_PRUEBA) { toast('Modo prueba: la configuración se toma de js/firebase-prueba.local.js', 'err'); return; }
-  localStorage.setItem('hd_fb', JSON.stringify(cfg));
-  // Si este teléfono venía trabajando en modo local y tiene datos, NO se
-  // conecta directo (la nube reemplazaría lo local): pasa por el rescate.
-  if (!USE_FB && hayDatosLocales()) {
-    document.getElementById('fb-cfg').style.display = 'none';
-    localStorage.setItem('hd_rescate_pendiente', '1');
-    iniciarRescate(cfg);
-    return;
-  }
-  loadFirebaseSDK(cfg);
+  toast(MODO_PRUEBA
+    ? 'Modo prueba: la configuración se toma de js/firebase-prueba.local.js'
+    : 'La configuración de la app es fija y no se puede cambiar desde aquí.', 'err');
 }
 
 // opts.rescate: conexión para el rescate — no arranca la sincronización y,
@@ -51,7 +27,7 @@ function _loadFirebaseSDK(cfg, opts, resolve) {
   const fallar = (msg) => {
     reportarError('Conectar Firebase', new Error(msg));
     if (opts.soloSesion) {
-      mostrarLogin(msg + ' Sin el inicio de sesión no se muestran datos. Conéctate a internet y toca Reintentar.', 'err');
+      mostrarLogin(msg + ' Sin el inicio de sesión no se muestran datos, pero lo guardado en este teléfono se conserva. Conéctate a internet y toca Reintentar.', 'err');
       formularioLogin(false);
       botonReintentar(true);
       resolve(false);

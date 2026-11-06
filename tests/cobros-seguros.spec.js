@@ -789,7 +789,7 @@ test.describe('4. rescate de datos locales', () => {
     await page.evaluate(() => modoLocalTemporal('Firebase tardó demasiado en responder.'));
     await expect(page.locator('#banner-sinsync')).toBeVisible({ timeout: 15000 });
     await expect(page.locator('#sync-lbl')).toContainText('SIN SINCRONIZAR');
-    expect(await page.evaluate(() => localStorage.getItem('hd_fb'))).toBe(cfg); // NO quedó 'local'
+    expect(await page.evaluate(() => localStorage.getItem('hd_fb'))).not.toBe('local'); // NO quedó 'local'
     expect(await page.evaluate(() => localStorage.getItem('hd_rescate_pendiente'))).toBeNull();
     await page.evaluate(() => registrarCobro('c_prueba_1', 0, 'PAGO'));
     expect(await page.evaluate(() => localStorage.getItem('hd_rescate_pendiente'))).toBe('1');

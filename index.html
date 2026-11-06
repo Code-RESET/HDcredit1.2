@@ -10,17 +10,63 @@
 <meta name="apple-mobile-web-app-title" content="HD Crédit">
 <link rel="apple-touch-icon" href="icon-192.png">
 <script>
+  // Versión de esta página. js/app.js debe declarar la misma: si no coincide,
+  // o un script no carga, se avisa en vez de dejar el login en "Cargando…".
+  window.HD_VERSION = '20261105';
+  (function () {
+    const OPCIONALES = /\/js\/(config-real|firebase-prueba\.local)\.js/;
+    let scriptFallido = false;
+    document.addEventListener('error', e => {
+      const t = e.target;
+      if (t && t.tagName === 'SCRIPT' && /\/js\//.test(t.src) && !OPCIONALES.test(t.src)) scriptFallido = true;
+    }, true);
+    function avisarFalloCarga(msg) {
+      const $ = id => document.getElementById(id);
+      if ($('loader')) $('loader').style.display = 'none';
+      if ($('login-scr')) $('login-scr').classList.add('on');
+      if ($('login-form')) $('login-form').hidden = true;
+      if ($('login-msg')) { $('login-msg').textContent = msg; $('login-msg').hidden = false; $('login-msg').dataset.tipo = 'err'; }
+      if ($('login-reintentar')) { $('login-reintentar').hidden = false; $('login-reintentar').onclick = window.hdRepararCarga; }
+    }
+    // Quita solo la copia de la app: los datos del teléfono no están ahí.
+    window.hdRepararCarga = async () => {
+      if (navigator.onLine && window.caches) {
+        try { await Promise.all((await caches.keys()).map(k => caches.delete(k))); } catch(e) {}
+      }
+      location.reload();
+    };
+    window.addEventListener('load', () => {
+      if (scriptFallido || window.HD_APP_VERSION !== window.HD_VERSION) {
+        avisarFalloCarga('La app no terminó de actualizarse. Lo guardado en este teléfono se conserva. Conéctate a internet y toca Reintentar.');
+        return;
+      }
+      setTimeout(() => {
+        const scr = document.getElementById('login-scr'), btn = document.getElementById('login-btn'), msg = document.getElementById('login-msg');
+        if (scr && scr.classList.contains('on') && btn && btn.disabled && msg && msg.textContent.trim() === 'Cargando…') {
+          avisarFalloCarga('La app está tardando demasiado en cargar. Lo guardado en este teléfono se conserva. Revisa tu conexión y toca Reintentar.');
+        }
+      }, 30000);
+    });
+  })();
+
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', async () => {
+      const yaTeniaVersion = !!navigator.serviceWorker.controller; // primera instalación: no hace falta recargar
       let reg;
       try { reg = await navigator.serviceWorker.register('sw.js'); }
       catch(e) { if (typeof reportarError === 'function') reportarError('Registrar service worker', e); return; }
       if (!reg) return; // navegador/entorno que bloquea service workers
-      // Si hay nueva versión esperando, activarla inmediatamente
+      // Recarga para usar la versión nueva, sin cortar a quien está escribiendo
+      // o tiene una ventana abierta (por ejemplo, un cobro o el rescate).
+      const ocupado = () => /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || '') || !!document.querySelector('.overlay.open');
+      const recargarAlTerminar = () => {
+        if (!ocupado()) { location.reload(); return; }
+        setTimeout(recargarAlTerminar, 5000);
+      };
       reg.addEventListener('updatefound', () => {
         const newSW = reg.installing;
         newSW.addEventListener('statechange', () => {
-          if (newSW.state === 'activated') location.reload();
+          if (newSW.state === 'activated' && yaTeniaVersion) recargarAlTerminar();
         });
       });
     });
@@ -241,6 +287,7 @@ tbody tr:last-child td{border-bottom:none}
 .login-prueba{background:var(--warn);color:#000;font-weight:800;font-size:.78rem;padding:6px 10px;border-radius:var(--radius);margin-bottom:14px;text-align:center}
 #login-msg{font-size:.82rem;margin-top:10px;color:var(--danger);white-space:pre-line}
 #login-msg[data-tipo="info"]{color:var(--muted)}
+#login-reintentar[hidden]{display:none}
 body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.sin-sesion #rev-badge,body.sin-sesion #banner-sinsync{visibility:hidden}
 
 /* FIREBASE CONFIG */
@@ -438,7 +485,6 @@ body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.si
     <div class="sb-sec">Cobranza</div>
     <div class="ni" onclick="gv('morosos')"><i class="fas fa-exclamation-circle"></i> Morosos y Recargos <span class="nb" id="nb-mor" style="display:none">0</span></div>
     <div class="sb-sec">Config</div>
-    <div class="ni" onclick="document.getElementById('fb-cfg').style.display='flex'"><i class="fas fa-fire"></i> Firebase</div>
     <div class="ni" id="ni-salir" style="display:none" onclick="cerrarSesion()"><i class="fas fa-sign-out-alt"></i> Cerrar sesión</div>
   </div>
   <div class="sb-foot">
@@ -804,17 +850,18 @@ body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.si
   </div>
 </div>
 
-<script src="js/datos.js"></script>
+<!-- ?v= debe coincidir con HD_VERSION (arriba), sw.js y js/app.js -->
+<script src="js/datos.js?v=20261105"></script>
 <!-- Configuración del Firebase real: solo en la app publicada (el sitio de
      prueba no lo incluye; sin él, la app se detiene con un error claro) -->
-<script src="js/config-real.js"></script>
-<script src="js/sesion.js"></script>
-<script src="js/sync.js"></script>
-<script src="js/negocio.js"></script>
-<script src="js/ui.js"></script>
-<script src="js/export.js"></script>
-<script src="js/rescate.js"></script>
-<script src="js/app.js"></script>
+<script src="js/config-real.js?v=20261105"></script>
+<script src="js/sesion.js?v=20261105"></script>
+<script src="js/sync.js?v=20261105"></script>
+<script src="js/negocio.js?v=20261105"></script>
+<script src="js/ui.js?v=20261105"></script>
+<script src="js/export.js?v=20261105"></script>
+<script src="js/rescate.js?v=20261105"></script>
+<script src="js/app.js?v=20261105"></script>
 </body>
 </html>
 

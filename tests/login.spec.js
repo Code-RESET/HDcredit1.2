@@ -122,8 +122,9 @@ async function arrancar(page, { ls = {}, sesion = null, nube = {}, sdk = true, p
   const bloqueadas = [];
   await page.route(BLOQUEAR, r => { bloqueadas.push(r.request().url()); r.abort(); });
   // Sitio de prueba: no se publica js/config-real.js
-  if (sinConfigReal) await page.route('**/js/config-real.js', r => r.fulfill({ status: 404, body: '' }));
+  if (sinConfigReal) await page.route('**/js/config-real.js*', r => r.fulfill({ status: 404, body: '' }));
   await page.route('**/js/firebase-prueba.local.js', r => {
+    if (prueba === 'colgado') return; // el servidor nunca responde
     if (!prueba || prueba === 'falta') return r.fulfill({ status: 404, body: '' });
     return r.fulfill({ status: 200, contentType: 'application/javascript', body: 'window.HD_FIREBASE_PRUEBA = ' + JSON.stringify(prueba) + ';' });
   });
@@ -148,7 +149,7 @@ const esperarLoader = page => page.waitForFunction(() => document.getElementById
 const reg = page => page.evaluate(() => window.__reg || { configs: [], firestore: 0, intentos: [], anonimo: 0, signOut: 0, escuchas: 0, esperas: 0 });
 const textoVisible = page => page.evaluate(() => document.body.innerText);
 const nubeConCliente = { [NUBE + 'clientes/c_ficticio_1']: CLI_FICTICIO };
-const lsNube = { hd_fb: JSON.stringify(CFG_FICTICIA), hd_c: [CLI_LOCAL], hd_h: [] };
+const lsNube = { hd_fb: JSON.stringify({ apiKey: API_KEY_REAL, projectId: PROYECTO_REAL }), hd_c: [CLI_LOCAL], hd_h: [] };
 const autorizadosLS = page => page.evaluate(() => JSON.parse(localStorage.getItem('hd_autorizados') || '[]'));
 async function sinDatos(page) {
   const txt = await textoVisible(page);
@@ -375,6 +376,213 @@ test.describe('5. Cerrar sesión avisa y espera lo pendiente', () => {
     await expect(page.locator('#toasts')).toContainText('rescate pendiente');
     expect((await reg(page)).signOut).toBe(0);
   });
+
+  // Sustituye confirm() para leer el aviso y decidir la respuesta
+  const responderConfirm = (page, respuesta) => page.evaluate(r => {
+    window.__avisos = [];
+    window.confirm = m => { window.__avisos.push(m); return r; };
+  }, respuesta);
+  const avisos = page => page.evaluate(() => window.__avisos);
+  const lsSinRed = { ...lsNube, hd_autorizados: [UID_OK] };
+
+  test('M4: sin internet y sin pendientes avisa que no podrá volver a entrar; si cancela, sigue dentro', async ({ page }) => {
+    await arrancar(page, { ls: lsSinRed, nube: nubeConCliente, sesion: 'normal', online: false, ctl: { nubeCaida: true } });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    await responderConfirm(page, false);
+    await page.evaluate(() => cerrarSesion());
+    const a = await avisos(page);
+    expect(a).toHaveLength(1);
+    expect(a[0]).toContain('NO podrás volver a entrar hasta tener internet');
+    expect(a[0]).toContain('no se borra');
+    expect((await reg(page)).signOut).toBe(0);
+    await expect(page.locator('#login-scr')).toBeHidden();
+  });
+
+  test('M4: si acepta salir sin internet, el login explica qué pasa y los datos se conservan', async ({ page }) => {
+    await arrancar(page, { ls: lsSinRed, nube: nubeConCliente, sesion: 'normal', online: false, ctl: { nubeCaida: true } });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    await responderConfirm(page, true);
+    await recargaTras(page, () => page.evaluate(() => { cerrarSesion(); }));
+    await expect(page.locator('#login-msg')).toContainText('Cerraste sesión sin internet');
+    await expect(page.locator('#login-msg')).toContainText('se conserva');
+    expect((await reg(page)).signOut).toBe(1);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('hd_c')).length)).toBeGreaterThan(0);
+    await sinDatos(page);
+  });
+
+  test('M4: con Wi-Fi pero sin respuesta de la nube también avisa', async ({ page }) => {
+    await arrancar(page, { ls: lsSinRed, nube: nubeConCliente, sesion: 'normal', ctl: { nubeCaida: true } });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    await responderConfirm(page, false);
+    await page.evaluate(() => cerrarSesion());
+    expect((await avisos(page))[0]).toContain('No hay conexión con la nube');
+  });
+
+  test('M4: con conexión y sin pendientes no muestra la advertencia', async ({ page }) => {
+    await arrancar(page, { ls: lsNube, nube: nubeConCliente, sesion: 'normal' });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    await responderConfirm(page, false);
+    await page.evaluate(() => cerrarSesion());
+    const a = await avisos(page);
+    expect(a).toHaveLength(1);
+    expect(a[0]).not.toContain('No hay conexión');
+    expect(a[0]).toContain('¿Cerrar sesión');
+  });
+
+  test('M4: con cobros por revisar y sin internet avisa de las dos cosas', async ({ page }) => {
+    await arrancar(page, { ls: lsSinRed, nube: nubeConCliente, sesion: 'normal', online: false, ctl: { nubeCaida: true } });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    await page.evaluate(() => { window.leerRevision = () => [{}, {}]; leerRevision = window.leerRevision; });
+    await responderConfirm(page, false);
+    await page.evaluate(() => cerrarSesion());
+    const a = (await avisos(page))[0];
+    expect(a).toContain('No hay conexión');
+    expect(a).toContain('2 cobro(s) por revisar');
+  });
+
+  test('M4: una sesión anónima vieja sin internet no se cierra y explica cómo seguir', async ({ page }) => {
+    await arrancar(page, { ls: lsNube, nube: nubeConCliente, sesion: 'anonima', online: false });
+    await expect(page.locator('#login-msg')).toContainText('Sin internet');
+    await expect(page.locator('#login-msg')).toContainText('se conservan');
+    await expect(page.locator('#login-reintentar')).toBeVisible();
+    await expect(page.locator('#login-btn')).toBeDisabled();
+    expect((await reg(page)).signOut).toBe(0);
+    expect(await page.evaluate(() => localStorage.getItem('hd_rescate_pendiente'))).toBe('1');
+    await sinDatos(page);
+  });
+});
+
+test.describe('M1. Sin mezclar versiones ni quedar bloqueado en el login', () => {
+  const leer = f => fs.readFileSync(path.join(RAIZ, f), 'utf8');
+
+  test('index.html, sw.js y js/app.js declaran la misma versión, y sw.js guarda todos los scripts', () => {
+    const html = leer('index.html');
+    const version = (html.match(/window\.HD_VERSION = '([^']+)'/) || [])[1];
+    expect(version).toBeTruthy();
+    const sw = leer('sw.js');
+    expect((sw.match(/const VERSION = '([^']+)'/) || [])[1]).toBe(version);
+    expect((leer('js/app.js').match(/window\.HD_APP_VERSION = '([^']+)'/) || [])[1]).toBe(version);
+    const scripts = [...html.matchAll(/<script src="(js\/[^"]+)"/g)].map(m => m[1]);
+    expect(scripts.length).toBeGreaterThan(0);
+    for (const s of scripts) expect(s, s + ' sin la versión').toMatch(new RegExp('\\.js\\?v=' + version + '$'));
+    const nombres = scripts.map(s => s.match(/js\/([^.]+)\.js/)[1]).filter(n => n !== 'config-real');
+    const enSw = sw.match(/\.\.\.\[([^\]]+)\]\.map\(n => `\.\/js\//)[1].match(/'[^']+'/g).map(n => n.replace(/'/g, ''));
+    expect(enSw.sort()).toEqual(nombres.sort());
+    expect(sw).toContain('./js/config-real.js?v=${VERSION}');
+  });
+
+  test('HTML nuevo con JS viejo: avisa y ofrece Reintentar, no se queda en "Cargando…"', async ({ page }) => {
+    await page.route('**/js/app.js*', r => r.fulfill({ status: 200, contentType: 'application/javascript', body: 'window.HD_APP_VERSION = "viejo";' }));
+    await arrancar(page, { ls: lsNube });
+    await expect(page.locator('#login-msg')).toContainText('no terminó de actualizarse');
+    await expect(page.locator('#login-msg')).toContainText('se conserva');
+    await expect(page.locator('#login-reintentar')).toBeVisible();
+    await expect(page.locator('#login-form')).toBeHidden();
+    await sinDatos(page);
+  });
+
+  test('si un script de la app no carga: avisa y Reintentar limpia solo la copia de la app, no los datos', async ({ page }) => {
+    await page.route('**/js/negocio.js*', r => r.abort());
+    await arrancar(page, { ls: lsNube });
+    await expect(page.locator('#login-msg')).toContainText('no terminó de actualizarse');
+    await page.evaluate(() => caches.open('copia-de-la-app'));
+    await page.unroute('**/js/negocio.js*');
+    await recargaTras(page, () => page.click('#login-reintentar'));
+    expect(await page.evaluate(() => caches.keys())).not.toContain('copia-de-la-app');
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('hd_c'))[0].nombre)).toBe('COPIA LOCAL FICTICIA');
+    await expect(page.locator('#login-btn')).toBeEnabled();
+  });
+
+  test('si la app arranca pero el login nunca queda listo, a los 30 s avisa', async ({ page }) => {
+    await page.clock.install();
+    await page.route('**/js/app.js*', r => r.fulfill({ status: 200, contentType: 'application/javascript', body: 'window.HD_APP_VERSION = window.HD_VERSION; document.getElementById("loader").style.display = "none";' }));
+    await arrancar(page, { ls: lsNube });
+    await expect(page.locator('#login-msg')).toHaveText('Cargando…');
+    await page.clock.fastForward(31000);
+    await expect(page.locator('#login-msg')).toContainText('tardando demasiado');
+    await expect(page.locator('#login-reintentar')).toBeVisible();
+  });
+
+  test('un login normal no dispara el aviso y no deja "Cargando…" con el formulario listo', async ({ page }) => {
+    await page.clock.install();
+    await arrancar(page, { ls: lsNube, nube: nubeConCliente });
+    await page.clock.runFor(2500);
+    await expect(page.locator('#login-btn')).toBeEnabled();
+    await expect(page.locator('#login-msg')).not.toHaveText('Cargando…');
+    await page.clock.fastForward(31000);
+    await expect(page.locator('#login-form')).toBeVisible();
+    await expect(page.locator('#login-reintentar')).toBeHidden();
+  });
+
+  test('el sitio de prueba sin js/config-real.js no se toma como una carga fallida', async ({ page }) => {
+    await arrancar(page, { sinConfigReal: true, prueba: CFG_FICTICIA, nube: nubeConCliente });
+    await expect(page.locator('#login-btn')).toBeEnabled();
+    await expect(page.locator('#login-form')).toBeVisible();
+    await expect(page.locator('#login-reintentar')).toBeHidden();
+  });
+
+  test('si el servidor no responde al buscar la configuración de prueba, el login no se traba', async ({ page }) => {
+    await arrancar(page, { ls: lsNube, prueba: 'colgado', nube: nubeConCliente });
+    await expect(page.locator('#login-btn')).toBeEnabled({ timeout: 12000 });
+    expect((await reg(page)).configs).toEqual([PROYECTO_REAL]);
+  });
+});
+
+// Con el service worker real. La app corre en modo local automatizado, así que
+// no carga Firebase; lo único externo son CDN públicos (fuentes y el SDK).
+test.describe('M1. Service worker', () => {
+  test.use({ serviceWorkers: 'allow' });
+  const local = () => { localStorage.setItem('hd_fb', 'local'); localStorage.setItem('hd_local_manual', '1'); };
+
+  test('guarda la versión completa, borra las anteriores y abre sin red con la misma versión', async ({ page, context }) => {
+    await page.addInitScript(local);
+    await page.goto('/manifest.json');
+    await page.evaluate(() => caches.open('hdcredit-v3'));
+    await page.goto('/index.html', { waitUntil: 'load' });
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+    const version = await page.evaluate(() => window.HD_VERSION);
+    await expect.poll(() => page.evaluate(() => caches.keys())).toEqual(['hdcredit-' + version]);
+    const urls = await page.evaluate(async () => (await (await caches.open('hdcredit-' + window.HD_VERSION)).keys()).map(r => r.url));
+    for (const n of ['datos', 'config-real', 'sesion', 'sync', 'negocio', 'ui', 'export', 'rescate', 'app']) {
+      expect(urls.some(u => u.endsWith(`/js/${n}.js?v=${version}`)), n).toBe(true);
+    }
+    expect(urls.some(u => u.endsWith('/index.html'))).toBe(true);
+
+    await context.setOffline(true);
+    await page.reload({ waitUntil: 'load' });
+    expect(await page.evaluate(() => [window.HD_VERSION, window.HD_APP_VERSION])).toEqual([version, version]);
+    await expect(page.locator('#sidebar')).toBeVisible();
+    await expect(page.locator('#login-reintentar')).toBeHidden();
+
+    // Sin red, cualquier URL de la app abre la copia guardada
+    await page.goto('/index.html?prueba=0', { waitUntil: 'load' });
+    expect(await page.evaluate(() => window.HD_APP_VERSION)).toBe(version);
+    await context.setOffline(false);
+  });
+
+  test('un 404 nunca se guarda ni reemplaza una copia buena', async ({ page }) => {
+    await page.addInitScript(local);
+    await page.goto('/index.html', { waitUntil: 'load' });
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+    const guardado = await page.evaluate(() => new Promise(resolve => {
+      const s = document.createElement('script');
+      s.src = 'js/no-existe.js';
+      s.onerror = s.onload = async () => { await new Promise(r => setTimeout(r, 200)); resolve(!!(await caches.match('js/no-existe.js'))); };
+      document.head.appendChild(s);
+    }));
+    expect(guardado).toBe(false);
+  });
+
+  test('la primera instalación no recarga la página', async ({ page }) => {
+    await page.addInitScript(local);
+    await page.goto('/index.html', { waitUntil: 'load' });
+    await page.evaluate(() => { window.__sinRecargar = true; return navigator.serviceWorker.ready; });
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+    await page.waitForTimeout(500);
+    expect(await page.evaluate(() => window.__sinRecargar)).toBe(true);
+  });
 });
 
 test.describe('6. Modo prueba', () => {
@@ -460,10 +668,65 @@ test.describe('Configuración real aparte (js/config-real.js)', () => {
     expect(await page.evaluate(() => localStorage.getItem('hd_fb'))).toContain(PROYECTO_REAL); // se guarda como antes
   });
 
-  test('con el archivo, una configuración guardada sigue teniendo prioridad (igual que antes)', async ({ page }) => {
+  test('M2: una configuración guardada de otro proyecto no gana; sin datos locales se reemplaza por la real', async ({ page }) => {
     await arrancar(page, { ls: { hd_fb: JSON.stringify(CFG_FICTICIA) }, nube: nubeConCliente, sesion: 'normal' });
     await expect(page.locator('#login-scr')).toBeHidden();
-    expect((await reg(page)).configs).toEqual(['demo-hd-prueba-ficticio']);
+    expect((await reg(page)).configs).toEqual([PROYECTO_REAL]);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('hd_fb')).projectId)).toBe(PROYECTO_REAL);
+    expect(await page.evaluate(() => localStorage.getItem('hd_rescate_pendiente'))).toBeNull();
+  });
+
+  test('M2: con datos de otro proyecto en el teléfono, pasan por el rescate y no se reemplazan ni se suben solos', async ({ page }) => {
+    await arrancar(page, { ls: { hd_fb: JSON.stringify(CFG_FICTICIA), hd_c: [CLI_LOCAL], hd_h: [] }, nube: nubeConCliente, sesion: 'normal' });
+    await expect(page.locator('#m-rescate')).toHaveClass(/open/);
+    const r = await reg(page);
+    expect(r.configs).toEqual([PROYECTO_REAL]);
+    expect(r.escuchas).toBe(0); // no empezó a sincronizar
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('hd_c')).map(c => c.nombre))).toEqual(['COPIA LOCAL FICTICIA']);
+    expect(await page.evaluate(() => localStorage.getItem('hd_rescate_pendiente'))).toBe('1');
+  });
+
+  test('M2: la configuración guardada del proyecto real no cambia nada ni pide rescate', async ({ page }) => {
+    await arrancar(page, { ls: lsNube, nube: nubeConCliente, sesion: 'normal' });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    await expect(page.locator('#m-rescate')).not.toHaveClass(/open/);
+    expect((await reg(page)).configs).toEqual([PROYECTO_REAL]);
+  });
+
+  for (const invalida of ['null', '{no es json', '{}']) {
+    test(`M2: una configuración guardada inválida (${invalida}) no bloquea ni deja en blanco`, async ({ page }) => {
+      await arrancar(page, { ls: { hd_fb: invalida, hd_c: [CLI_LOCAL], hd_h: [] }, nube: nubeConCliente, sesion: 'normal' });
+      await expect(page.locator('#login-scr')).toBeHidden();
+      expect((await reg(page)).configs).toEqual([PROYECTO_REAL]);
+      expect(await page.evaluate(() => JSON.parse(localStorage.getItem('hd_fb')).projectId)).toBe(PROYECTO_REAL);
+    });
+  }
+
+  test('M2: en producción no se puede pegar otra configuración y ya no está en el menú', async ({ page }) => {
+    await arrancar(page, { ls: lsNube, nube: nubeConCliente, sesion: 'normal' });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    const antes = await page.evaluate(() => localStorage.getItem('hd_fb'));
+    await page.evaluate(cfg => { document.getElementById('fb-input').value = JSON.stringify(cfg); connectFirebase(); }, CFG_FICTICIA);
+    await expect(page.locator('#toasts')).toContainText('es fija');
+    expect(await page.evaluate(() => localStorage.getItem('hd_fb'))).toBe(antes);
+    expect((await reg(page)).configs).toEqual([PROYECTO_REAL]);
+    expect(await page.locator('#sidebar .ni:has-text("Firebase")').count()).toBe(0);
+  });
+
+  test('M2: reintentar la conexión ignora una configuración guardada de otro proyecto', async ({ page }) => {
+    await arrancar(page, { ls: lsNube, nube: nubeConCliente, sesion: 'normal' });
+    await expect(page.locator('#login-scr')).toBeHidden();
+    const usada = await page.evaluate(cfg => {
+      localStorage.setItem('hd_fb', JSON.stringify(cfg));
+      _cfgNube = null;
+      let recibida = null;
+      const original = loadFirebaseSDK;
+      loadFirebaseSDK = c => { recibida = c; return Promise.resolve(true); };
+      reintentarConexion();
+      loadFirebaseSDK = original;
+      return recibida && recibida.projectId;
+    }, CFG_FICTICIA);
+    expect(usada).toBe(PROYECTO_REAL);
   });
 
   test('sin el archivo y sin configuración de prueba: se detiene con un error claro y no conecta a nada', async ({ page }) => {
@@ -535,7 +798,9 @@ test.describe('Reglas y archivos', () => {
     expect(sinComentarios).toMatch(/rules_version\s*=\s*'2'/);
     expect(sinComentarios).toMatch(/sign_in_provider\s*==\s*'password'/);
     expect(sinComentarios).toMatch(/request\.auth\.uid\s+in\s+\[/);
-    expect(sinComentarios).toContain("'ZknvkenxXEgWugfxWbt3GnX7Fp53'");
+    const uids = sinComentarios.match(/request\.auth\.uid\s+in\s+\[([^\]]*)\]/)[1].match(/'[^']+'/g);
+    expect(uids).toEqual(["'R3rdDFisDjQrkLqnt1LtpS848uB2'", "'nXbh0hlxW1hu757DCQRZKgPcvDm2'"]);
+    expect(reglas).not.toContain('ZknvkenxXEgWugfxWbt3GnX7Fp53'); // sin el UID de prueba
     expect(sinComentarios).not.toMatch(/if\s+true/);
     const allows = sinComentarios.match(/allow[^;]+;/g) || [];
     expect(allows.length).toBeGreaterThan(0);
