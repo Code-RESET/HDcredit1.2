@@ -29,7 +29,9 @@ function calcRecargoPorCliente(c) {
   for (let i = c.pagadas; i < elapsed; i++) {
     const dueDate = getQDueDate(c.inicio, i, producto);
     if (!dueDate) continue;
-    const diasAtraso = Math.max(0, Math.floor((today - dueDate) / (1000 * 60 * 60 * 24)));
+    // Días de calendario desde el vencimiento: el día del vencimiento = 0
+    // (no atrasado), el día siguiente = 1 día de recargo, y así.
+    const diasAtraso = diasDeAtraso(dueDate, today);
     periodos.push({ idx: i + 1, dueDate, diasAtraso, recargo: diasAtraso * porDia });
   }
   return { periodos, total: periodos.reduce((a, p) => a + p.recargo, 0) };
@@ -147,7 +149,8 @@ function renderMorosos() {
 /* ============================================================
    MODAL / TOAST / VIEW HELPERS
 ============================================================ */
-function esc(s){ const d=document.createElement('div'); d.textContent=String(s??''); return d.innerHTML; }
+// Escapa también comillas: se usa dentro de atributos (data-*, onclick)
+function esc(s){ const d=document.createElement('div'); d.textContent=String(s??''); return d.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function om(id){document.getElementById(id).classList.add('open')}
 function cm(id){document.getElementById(id).classList.remove('open')}
 function set(id,v){document.getElementById(id).textContent=v}
@@ -221,7 +224,8 @@ document.addEventListener('visibilitychange', () => {
 ============================================================ */
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
-    document.querySelectorAll('.overlay.open').forEach(o => o.classList.remove('open'));
+    // El rescate no se puede cerrar con Escape (hay que decidir qué hacer)
+    document.querySelectorAll('.overlay.open:not([data-bloqueante])').forEach(o => o.classList.remove('open'));
   }
 });
 
@@ -230,10 +234,12 @@ document.addEventListener('keydown', e => {
 ============================================================ */
 window.addEventListener('unhandledrejection', e => {
   console.error('HD Crédit — promise rejection:', e.reason);
+  reportarError('Promesa sin manejar', e.reason);
   if (e.reason?.message) toast('Error inesperado: ' + e.reason.message, 'err');
 });
-window.onerror = (msg, src, line) => {
+window.onerror = (msg, src, line, col, err) => {
   console.error('HD Crédit — JS error:', msg, 'en línea', line);
+  reportarError('Error de JavaScript', err || new Error(String(msg)), { donde: (src || '').split('/').pop() + ':' + line });
 };
 
 /* ============================================================
@@ -249,21 +255,12 @@ function initQSel(){
 }
 
 /* ============================================================
-   FIREBASE CONFIG POR DEFECTO (incrustada)
-   Se usa si el navegador no tiene nada guardado en localStorage
-   (limpieza de datos, actualización de Windows/Android, dispositivo
-   nuevo, etc.). Evita depender solo de localStorage, que el sistema
-   operativo o el navegador pueden borrar sin avisar.
+   FIREBASE CONFIG POR DEFECTO: viene de js/config-real.js (solo en la app
+   publicada). Si ese archivo falta (p. ej. el sitio de prueba), es null y
+   la app se detiene con un error en vez de conectarse por accidente.
 ============================================================ */
-const DEFAULT_FB_CONFIG = {
-  apiKey: "AIzaSyA6IW4VCq1j05gHZRQ7l2LGwgsDDwC_JAY",
-  authDomain: "hdcredit12-2c6ba.firebaseapp.com",
-  projectId: "hdcredit12-2c6ba",
-  storageBucket: "hdcredit12-2c6ba.firebasestorage.app",
-  messagingSenderId: "842352004463",
-  appId: "1:842352004463:web:96acdcef130db26e46ac9a",
-  measurementId: "G-1KBSKD2Q27"
-};
+const DEFAULT_FB_CONFIG = (window.HD_FIREBASE_REAL && window.HD_FIREBASE_REAL.apiKey && window.HD_FIREBASE_REAL.projectId)
+  ? window.HD_FIREBASE_REAL : null;
 
 /* ============================================================
    INIT
@@ -274,6 +271,8 @@ function init(){
 
   initQSel();
   renderTF();
+  pintarAvisoErrores(); // errores guardados de sesiones anteriores
+  pintarAvisoRevision(); // cobros por revisar guardados en el teléfono
 
   // Pide almacenamiento persistente para reducir el riesgo de que el
   // navegador borre localStorage bajo presión de espacio.
@@ -288,42 +287,69 @@ function init(){
     document.getElementById('loader').classList.add('hide');
     setTimeout(()=>document.getElementById('loader').style.display='none',450);
 
-    if(!saved){
-      // No hay nada guardado en este dispositivo: usa la config
-      // incrustada por defecto en vez de pedirle al usuario que la
-      // pegue a mano cada vez.
-      localStorage.setItem('hd_fb', JSON.stringify(DEFAULT_FB_CONFIG));
-      loadFirebaseSDK(DEFAULT_FB_CONFIG);
-      return;
-    }
-    if(saved==='local'){
-      loadLocal();
-      return;
-    }
-    try{
-      const cfg=JSON.parse(saved);
-      loadFirebaseSDK(cfg);
-    }catch(e){
-      loadFirebaseSDK(DEFAULT_FB_CONFIG);
-    }
+    arrancarConexion(saved);
   },1600);
+}
+
+// Decide cómo conectar SIN arriesgar datos que solo existen en este teléfono.
+// En modo nube, primero se inicia sesión: antes de eso no se carga ni se
+// muestra ningún dato (ni de la nube ni la copia local).
+async function arrancarConexion(saved){
+  // 1. "Solo local" ya no existe para los usuarios: un teléfono que lo usaba
+  //    inicia sesión y pasa por el rescate (paso 2), sin perder sus datos.
+  //    Solo las pruebas automáticas (navegador controlado por Playwright,
+  //    navigator.webdriver) siguen corriendo en local, sin Firebase.
+  if (navigator.webdriver === true && !MODO_PRUEBA && saved === 'local' && localStorage.getItem('hd_local_manual') === '1') {
+    _modoLocalAutomatizado = true; ocultarLogin(); loadLocal(); return;
+  }
+  // El sitio de prueba se reconoce aunque falte ?prueba=1 (app instalada)
+  await detectarEntorno();
+  const cfg = await configNube(saved);
+  if (!cfg) return; // bloqueado: se queda en la pantalla de aviso, sin datos
+  _cfgNube = cfg;
+  mostrarLogin();
+  const conSesion = await loadFirebaseSDK(cfg, { soloSesion: true });
+  if (!conSesion) return; // sin sesión: no se muestra nada
+  // 2. Modo local heredado (versiones anteriores lo guardaban solo al
+  //    fallar la red) o cambios hechos en modo local temporal: rescate
+  //    obligatorio antes de reconectar — si hay algo que rescatar.
+  //    Lo mismo si venía de otro proyecto: sus datos no se reemplazan ni se
+  //    suben sin que el usuario los revise.
+  const pendiente = localStorage.getItem('hd_rescate_pendiente') === '1';
+  const estadoGuardada = estadoConfigGuardada(saved);
+  if ((saved === 'local' || pendiente || estadoGuardada === 'ajena') && hayDatosLocales()) {
+    localStorage.setItem('hd_rescate_pendiente', '1');
+    iniciarRescate(cfg);
+    return;
+  }
+  // 3. Normal: conectar a la nube
+  if (!MODO_PRUEBA && estadoGuardada !== 'real') localStorage.setItem('hd_fb', JSON.stringify(cfg));
+  loadFirebaseSDK(cfg);
 }
 
 // Expose globals
 window.openNew=openNew; window.editC=editC; window.saveC=saveC;
 window.onProductoChange=onProductoChange;
 window.calcPQ=calcPQ; window.confirmDel=confirmDel;
-window.togglePago=togglePago; window.openEC=openEC; window.sendEC=sendEC;
+window.registrarCobro=registrarCobro; window.openEC=openEC; window.sendEC=sendEC;
 window.waCliente=waCliente; window.waAll=waAll;
 window.filterC=filterC; window.filterH=filterH;
 window.renderCL=renderCL; window.gv=gv; window.toggleSB=toggleSB;
 window.doExport=doExport; window.doExportXLSX=doExportXLSX; window.doExportJSON=doExportJSON; window.doImportJSON=doImportJSON;
-window.connectFirebase=connectFirebase; window.goLocal=goLocal;
+window.connectFirebase=connectFirebase;
 window.om=om; window.cm=cm;
 window.initPago=initPago; window.undoLastPago=undoLastPago;
 window.switchMorososTab=switchMorososTab; window.renderMorosos=renderMorosos;
 window.openReporte=openReporte; window.sendReporte=sendReporte;
 window.openReverso=openReverso; window.selReverso=selReverso; window.doReverso=doReverso;
 window.cargarMasHistorial=cargarMasHistorial;
+window.abrirErrores=abrirErrores; window.limpiarErrores=limpiarErrores;
+window.rescateDescargar=rescateDescargar; window.rescateComparar=rescateComparar;
+window.rescateSubir=rescateSubir; window.rescateSeguirLocal=rescateSeguirLocal;
+window.rescateTerminar=rescateTerminar; window.reintentarConexion=reintentarConexion;
+window.borrarCopiasDescargadas=borrarCopiasDescargadas;
+window.abrirRevision=abrirRevision; window.reintentarRevision=reintentarRevision; window.descartarRevision=descartarRevision;
 
 init();
+// Al final: si algo falló antes, index.html lo detecta y avisa.
+window.HD_APP_VERSION = '20261105';

@@ -2,22 +2,37 @@
 
 Sistema de control de pagos quincenal HD Crédit — PWA de archivo único (`index.html`), con sincronización opcional en Firebase/Firestore o almacenamiento solo local.
 
-## Sincronización sin inicio de sesión
+## Login con correo y contraseña
 
-Por decisión explícita del dueño de los datos, esta app **no pide iniciar sesión con Google** ni muestra ninguna pantalla de login. Todos los dispositivos leen y escriben la misma ruta compartida en Firestore (`usuarios/compartido/...`). El código de Firebase Authentication con Google Sign-In (el que causaba pantallas congeladas por antivirus/popups bloqueados) sigue eliminado por completo.
+La app pide **correo y contraseña** (Firebase Authentication, proveedor "Correo electrónico/contraseña") en su propia pantalla: sin ventanas de Google ni popups. El inicio de sesión anónimo se quitó. Antes de iniciar sesión **no se muestra ningún dato** (ni de la nube ni la copia guardada en el teléfono). La contraseña no se guarda en ningún archivo ni en el teléfono; Firebase conserva solo su token de sesión.
 
-### Autenticación anónima silenciosa (nuevo)
+Todos los usuarios autorizados comparten la ruta `usuarios/compartido/...`. Quién puede leer/escribir lo decide `firestore.rules`: solo los UID de la lista y solo con correo y contraseña (los anónimos se rechazan).
 
-La app ahora inicia sesión anónima en Firebase (`signInAnonymously()`) en segundo plano, sin ninguna interacción del usuario — no hay ventana, ni botón, ni cuenta que crear. Esto permite exigir en las reglas de Firestore `allow read, write: if request.auth != null;` en vez de dejarlas completamente abiertas a cualquiera que conozca la configuración del proyecto.
+- **La sesión solo vale si la nube confirma el UID** (una lectura directa al servidor que las reglas solo permiten a los UID de la lista). Una cuenta no autorizada se cierra sola y no ve nada.
+- Sin internet: solo ve la copia del teléfono un UID que la nube **ya confirmó antes en ese teléfono** (`hd_autorizados`). Otra cuenta, o un teléfono sin poder cargar el SDK, no ve nada.
+- "Solo local" se quitó. Un teléfono que lo usaba inicia sesión y pasa por el rescate; sus datos se conservan.
+- Cerrar sesión primero sube los cobros en cola y las altas/ediciones pendientes; si no puede (sin red, rescate pendiente), **no deja salir**. Sin pendientes pero sin conexión con la nube, avisa antes de salir que no se podrá volver a entrar hasta tener internet. Una sesión anónima de la versión anterior intenta subir lo pendiente y fuerza el rescate antes de cerrarse; sin internet se conserva hasta tener conexión.
+- En producción el proyecto siempre sale de `js/config-real.js`. Un `hd_fb` guardado no lo cambia ni se puede pegar otra configuración; si apuntaba a otro proyecto y el teléfono tiene datos, pasan por el rescate.
 
-Si la autenticación anónima falla o tarda (por ejemplo, si el proveedor "Anónimo" no está habilitado en el proyecto), la app **sigue funcionando exactamente igual que antes** — no bloquea nada, solo deja de cumplir el requisito de las reglas nuevas hasta que se resuelva.
+### Publicar una versión
 
-**Para activar esta protección en un proyecto ya conectado (como el actual), hay que hacer dos pasos manuales en Firebase Console, en este orden:**
-1. **Authentication → Sign-in method → habilitar el proveedor "Anónimo".** Con este código ya desplegado, esto basta para que los dispositivos empiecen a autenticarse solos.
-2. **Confirmar que aparecen usuarios anónimos** en Authentication → Users (uno por dispositivo/navegador) antes de seguir.
-3. Recién entonces, **Firestore → Reglas** → cambiar `allow read, write: if true;` por `allow read, write: if request.auth != null;`. Hacerlo antes de confirmar el paso 2 dejaría la app sin poder sincronizar.
+Sube el mismo número de versión en `sw.js` (`VERSION`), `index.html` (`HD_VERSION` y los `?v=` de los scripts) y `js/app.js` (`HD_APP_VERSION`). Así el HTML y el JS de versiones distintas no se mezclan; si aun así pasa o un script no carga, la app lo avisa y ofrece Reintentar. Una prueba comprueba que los números coinciden.
 
-Mientras no se den estos pasos en la consola, las reglas siguen abiertas (`if true`) y todo sigue funcionando como hasta ahora — el cambio de código por sí solo no rompe nada, pero tampoco protege nada hasta que se actualicen las reglas.
+### Modo prueba
+
+1. Copia `js/firebase-prueba.example.js` como `js/firebase-prueba.local.js` (ignorado por git) y pega la configuración del Firebase **de prueba**.
+2. Abre `http://localhost:4173/index.html?prueba=1` (`npx http-server -p 4173 -c-1 .`).
+
+El modo prueba se activa con `?prueba=1`, en el Hosting de `hd-credit-prueba` (`*.web.app`/`*.firebaseapp.com`), en un navegador ya marcado como de prueba, o si el servidor tiene `js/firebase-prueba.local.js`. Así una app instalada o una URL sin el parámetro **nunca** se conecta al proyecto real. Solo usa ese archivo y **se niega a iniciar** si apunta al proyecto real (projectId, apiKey, appId o senderId), si falta el archivo, o si el navegador ya tiene datos de la app real.
+
+### Activar en producción (orden seguro)
+
+1. Firebase real → Authentication → habilitar **Correo electrónico/contraseña**, **desactivar el registro de usuarios** (Configuración → Acciones del usuario) y crear los usuarios; anotar sus UID. Mientras la regla siga siendo `request.auth != null`, cualquier cuenta con contraseña pasaría la confirmación: por eso el registro debe estar cerrado.
+2. Antes de desplegar, en cada teléfono con la versión vieja **y con internet**: ver "🟢 Sincronizado", que no haya cobros en cola y exportar un **respaldo JSON**.
+3. Desplegar esta versión. La regla actual acepta a los usuarios con contraseña, así que nada se corta. Al abrirla, cada teléfono sube lo pendiente de su sesión anónima y pasa por el rescate.
+4. Iniciar sesión en cada teléfono, terminar el rescate y comprobar que sincroniza.
+5. `firestore.rules` ya tiene los UID reales: probarlas en el simulador de reglas de la consola y **solo entonces** publicarlas en el proyecto real (nunca en `hd-credit-prueba`).
+6. Deshabilitar el proveedor "Anónimo" y borrar los usuarios anónimos viejos.
 
 ## Modo offline
 

@@ -13,5 +13,9 @@ module.exports = {
   },
   use: {
     baseURL: 'http://localhost:4173',
+    // Sin service worker: sus peticiones no pasan por page.route(), así que
+    // podría salir a internet sin el bloqueo de Firebase de las pruebas (y
+    // además recarga la página al activarse, lo que vuelve flaky un test).
+    serviceWorkers: 'block',
   },
 };

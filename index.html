@@ -10,14 +10,63 @@
 <meta name="apple-mobile-web-app-title" content="HD Crédit">
 <link rel="apple-touch-icon" href="icon-192.png">
 <script>
+  // Versión de esta página. js/app.js debe declarar la misma: si no coincide,
+  // o un script no carga, se avisa en vez de dejar el login en "Cargando…".
+  window.HD_VERSION = '20261105';
+  (function () {
+    const OPCIONALES = /\/js\/(config-real|firebase-prueba\.local)\.js/;
+    let scriptFallido = false;
+    document.addEventListener('error', e => {
+      const t = e.target;
+      if (t && t.tagName === 'SCRIPT' && /\/js\//.test(t.src) && !OPCIONALES.test(t.src)) scriptFallido = true;
+    }, true);
+    function avisarFalloCarga(msg) {
+      const $ = id => document.getElementById(id);
+      if ($('loader')) $('loader').style.display = 'none';
+      if ($('login-scr')) $('login-scr').classList.add('on');
+      if ($('login-form')) $('login-form').hidden = true;
+      if ($('login-msg')) { $('login-msg').textContent = msg; $('login-msg').hidden = false; $('login-msg').dataset.tipo = 'err'; }
+      if ($('login-reintentar')) { $('login-reintentar').hidden = false; $('login-reintentar').onclick = window.hdRepararCarga; }
+    }
+    // Quita solo la copia de la app: los datos del teléfono no están ahí.
+    window.hdRepararCarga = async () => {
+      if (navigator.onLine && window.caches) {
+        try { await Promise.all((await caches.keys()).map(k => caches.delete(k))); } catch(e) {}
+      }
+      location.reload();
+    };
+    window.addEventListener('load', () => {
+      if (scriptFallido || window.HD_APP_VERSION !== window.HD_VERSION) {
+        avisarFalloCarga('La app no terminó de actualizarse. Lo guardado en este teléfono se conserva. Conéctate a internet y toca Reintentar.');
+        return;
+      }
+      setTimeout(() => {
+        const scr = document.getElementById('login-scr'), btn = document.getElementById('login-btn'), msg = document.getElementById('login-msg');
+        if (scr && scr.classList.contains('on') && btn && btn.disabled && msg && msg.textContent.trim() === 'Cargando…') {
+          avisarFalloCarga('La app está tardando demasiado en cargar. Lo guardado en este teléfono se conserva. Revisa tu conexión y toca Reintentar.');
+        }
+      }, 30000);
+    });
+  })();
+
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', async () => {
-      const reg = await navigator.serviceWorker.register('sw.js');
-      // Si hay nueva versión esperando, activarla inmediatamente
+      const yaTeniaVersion = !!navigator.serviceWorker.controller; // primera instalación: no hace falta recargar
+      let reg;
+      try { reg = await navigator.serviceWorker.register('sw.js'); }
+      catch(e) { if (typeof reportarError === 'function') reportarError('Registrar service worker', e); return; }
+      if (!reg) return; // navegador/entorno que bloquea service workers
+      // Recarga para usar la versión nueva, sin cortar a quien está escribiendo
+      // o tiene una ventana abierta (por ejemplo, un cobro o el rescate).
+      const ocupado = () => /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || '') || !!document.querySelector('.overlay.open');
+      const recargarAlTerminar = () => {
+        if (!ocupado()) { location.reload(); return; }
+        setTimeout(recargarAlTerminar, 5000);
+      };
       reg.addEventListener('updatefound', () => {
         const newSW = reg.installing;
         newSW.addEventListener('statechange', () => {
-          if (newSW.state === 'activated') location.reload();
+          if (newSW.state === 'activated' && yaTeniaVersion) recargarAlTerminar();
         });
       });
     });
@@ -231,6 +280,16 @@ tbody tr:last-child td{border-bottom:none}
 .ec-q.pd{background:var(--border);color:var(--muted)}
 .ec-q.nx{background:rgba(255,184,0,.2);border:1px solid var(--warn);color:var(--warn)}
 
+/* LOGIN — tapa toda la app hasta tener sesión (visible por defecto) */
+#login-scr{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:8000;padding:20px}
+#login-scr.on{display:flex}
+#login-scr .cfg-box{max-width:400px}
+.login-prueba{background:var(--warn);color:#000;font-weight:800;font-size:.78rem;padding:6px 10px;border-radius:var(--radius);margin-bottom:14px;text-align:center}
+#login-msg{font-size:.82rem;margin-top:10px;color:var(--danger);white-space:pre-line}
+#login-msg[data-tipo="info"]{color:var(--muted)}
+#login-reintentar[hidden]{display:none}
+body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.sin-sesion #rev-badge,body.sin-sesion #banner-sinsync{visibility:hidden}
+
 /* FIREBASE CONFIG */
 #fb-cfg{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:6000;padding:20px}
 .cfg-box{background:var(--card);border:1px solid var(--border2);border-radius:var(--radius-lg);padding:36px;width:100%;max-width:540px}
@@ -247,6 +306,17 @@ tbody tr:last-child td{border-bottom:none}
 @keyframes blink{to{transform:scale(1.15);box-shadow:0 0 10px rgba(255,184,0,.4)}}
 
 /* UNDO BAR */
+.err-badge{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:6500;display:flex;align-items:center;gap:6px;background:var(--danger);color:#fff;border:0;border-radius:999px;padding:9px 14px;font-size:.8rem;font-weight:700;box-shadow:var(--shadow);cursor:pointer}
+.err-badge[hidden]{display:none}
+.rev-badge{background:var(--warn);color:#111;bottom:calc(64px + env(safe-area-inset-bottom,0px))}
+.banner-sinsync{position:fixed;left:0;right:0;top:0;z-index:6400;display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;background:var(--danger);color:#fff;font-size:.8rem;font-weight:700;padding:calc(6px + env(safe-area-inset-top,0px)) 16px 6px}
+.banner-sinsync[hidden]{display:none}
+.rsc-sec{border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
+.rsc-sec h4{font-size:.82rem;margin-bottom:4px}
+.rsc-sec ul{margin:4px 0 0 18px;color:var(--muted);font-size:.78rem}
+.err-item{border:1px solid var(--border2);border-left:3px solid var(--danger);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
+.err-meta{font-size:.72rem;color:var(--muted);font-family:'DM Mono',monospace}
+.err-msg{font-size:.84rem;margin-top:3px;overflow-wrap:anywhere}
 #undo-bar{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid rgba(255,184,0,.3);border-radius:var(--radius);padding:10px 14px;margin:0 18px 10px;font-size:.84rem;position:relative;overflow:hidden}
 #undo-bar .undo-msg{flex:1;font-size:.83rem}
 .undo-btn{background:rgba(255,184,0,.12);color:var(--warn);border:1px solid rgba(255,184,0,.3);padding:6px 13px;border-radius:8px;font-size:.78rem;font-weight:700;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px;font-family:inherit}
@@ -290,7 +360,29 @@ tbody tr:last-child td{border-bottom:none}
 }
 </style>
 </head>
-<body>
+<body class="sin-sesion">
+
+<!-- LOGIN: correo y contraseña. Visible desde el inicio; nada de la app
+     (ni datos) se muestra hasta iniciar sesión. Ver js/sesion.js -->
+<div id="login-scr" class="on" role="dialog" aria-modal="true" aria-label="Iniciar sesión">
+  <div class="cfg-box">
+    <div class="cfg-logo">HD Crédit</div>
+    <div id="login-prueba" class="login-prueba" hidden>🧪 MODO PRUEBA</div>
+    <form id="login-form" onsubmit="iniciarSesion(event)" autocomplete="on">
+      <div class="fg">
+        <label for="login-email">Correo</label>
+        <input class="fc" id="login-email" type="email" autocomplete="username" inputmode="email" required disabled>
+      </div>
+      <div class="fg">
+        <label for="login-pass">Contraseña</label>
+        <input class="fc" id="login-pass" type="password" autocomplete="current-password" required disabled>
+      </div>
+      <button class="btn btn-p" id="login-btn" type="submit" disabled><i class="fas fa-sign-in-alt"></i> Entrar</button>
+    </form>
+    <p id="login-msg" data-tipo="info">Cargando…</p>
+    <button class="btn btn-s" id="login-reintentar" type="button" onclick="location.reload()" hidden style="margin-top:10px"><i class="fas fa-sync"></i> Reintentar</button>
+  </div>
+</div>
 
 <!-- LOADER -->
 <div id="loader">
@@ -302,6 +394,43 @@ tbody tr:last-child td{border-bottom:none}
 <!-- TOASTS -->
 <div id="toasts"></div>
 
+<!-- Aviso fijo: trabajando sin sincronizar (modo local por fallo o rescate pendiente) -->
+<div id="banner-sinsync" class="banner-sinsync" hidden role="status">
+  <span id="banner-sinsync-txt">⚠️ SIN SINCRONIZAR</span>
+  <button class="btn btn-s btn-sm" id="banner-reintentar" onclick="reintentarConexion()"><i class="fas fa-sync"></i> Reintentar</button>
+</div>
+
+<!-- RESCATE: datos que solo existen en este teléfono -->
+<div class="overlay" id="m-rescate" data-bloqueante role="dialog" aria-modal="true" aria-label="Rescate de datos locales">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-life-ring" style="color:var(--warn);margin-right:8px"></i>Datos guardados solo en este teléfono</div></div>
+    <div id="resc-paso1">
+      <p id="resc-resumen" style="font-size:.86rem;margin-bottom:14px;white-space:pre-line"></p>
+      <button class="btn btn-p" id="resc-descargar" onclick="rescateDescargar()"><i class="fas fa-download"></i> 1. Descargar respaldo JSON</button>
+      <label style="display:flex;gap:8px;align-items:center;margin:14px 0;font-size:.85rem"><input type="checkbox" id="resc-check"> 2. Ya guardé el archivo de respaldo</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-p" id="resc-comparar" onclick="rescateComparar()" disabled><i class="fas fa-cloud"></i> 3. Conectar y comparar con la nube</button>
+        <button class="btn btn-s" id="resc-local" onclick="rescateSeguirLocal()"><i class="fas fa-mobile-alt"></i> Seguir sin conectar</button>
+      </div>
+    </div>
+    <div id="resc-paso2" hidden>
+      <div id="resc-comparacion" style="font-size:.84rem"></div>
+      <p id="resc-error" style="color:var(--danger);font-size:.82rem;margin-top:8px" hidden></p>
+      <label style="display:flex;gap:8px;align-items:center;margin:14px 0;font-size:.85rem"><input type="checkbox" id="resc-check2"> Revisé la comparación</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-p" id="resc-subir" onclick="rescateSubir()" disabled><i class="fas fa-cloud-upload-alt"></i> Subir faltantes a la nube</button>
+        <button class="btn btn-s" id="resc-sinsubir" onclick="rescateTerminar()" disabled>Conectar sin subir nada</button>
+        <button class="btn btn-s" id="resc-local2" onclick="rescateSeguirLocal()"><i class="fas fa-mobile-alt"></i> Seguir sin conectar</button>
+      </div>
+    </div>
+    <div id="resc-paso3" hidden>
+      <div id="resc-resultado" style="font-size:.86rem;white-space:pre-line;margin-bottom:14px"></div>
+      <button class="btn btn-p" id="resc-terminar" onclick="rescateTerminar()"><i class="fas fa-check"></i> Terminar y sincronizar</button>
+    </div>
+    <p style="font-size:.72rem;color:var(--muted);margin-top:14px">La copia de rescate se queda guardada en este teléfono; nada se borra automáticamente.</p>
+  </div>
+</div>
+
 <!-- FIREBASE CONFIG -->
 <div id="fb-cfg" style="display:none">
   <div class="cfg-box">
@@ -311,8 +440,8 @@ tbody tr:last-child td{border-bottom:none}
     <div class="cfg-steps">
       <div class="cstep"><div class="csn">1</div><div>Ve a <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a> y crea un proyecto (sin Google Analytics).</div></div>
       <div class="cstep"><div class="csn">2</div><div>En el proyecto → <strong>Firestore Database</strong> → Crear base de datos → Modo producción.</div></div>
-      <div class="cstep"><div class="csn">3</div><div><strong>Authentication</strong> → pestaña <strong>Sign-in method</strong> → habilita el proveedor <strong>Anónimo</strong>.<br><span style="color:var(--muted);font-size:.73rem">No pide login al usuario — cada dispositivo se identifica solo, en silencio, sin ventana ni cuenta de Google.</span></div></div>
-      <div class="cstep"><div class="csn">4</div><div>Firestore → pestaña <strong>Reglas</strong> → reemplaza todo con:<br><code style="color:var(--accent);font-size:.75rem">rules_version='2'; service cloud.firestore { match /databases/{database}/documents { match /usuarios/{document=**} { allow read, write: if request.auth != null; } } }</code><br><span style="color:var(--muted);font-size:.73rem">Solo dispositivos con la app conectada (autenticados en silencio) pueden leer/escribir — ya no cualquiera que conozca la configuración.</span></div></div>
+      <div class="cstep"><div class="csn">3</div><div><strong>Authentication</strong> → <strong>Sign-in method</strong> → habilita <strong>Correo electrónico/contraseña</strong> (no habilites Anónimo). En <strong>Users</strong> crea cada usuario y copia su UID.</div></div>
+      <div class="cstep"><div class="csn">4</div><div>Firestore → <strong>Reglas</strong>: usa el archivo <code style="color:var(--accent)">firestore.rules</code> del proyecto con los UID autorizados.<br><span style="color:var(--muted);font-size:.73rem">Solo esos usuarios (con correo y contraseña) pueden leer/escribir; los anónimos se rechazan.</span></div></div>
       <div class="cstep"><div class="csn">5</div><div>Configuración del proyecto ⚙️ → <strong>Agregar app</strong> → Web (&lt;/&gt;) → copia el objeto <code style="color:var(--accent)">firebaseConfig</code>.</div></div>
       <div class="cstep"><div class="csn">6</div><div>Pega el JSON abajo y toca <strong>Conectar Firebase</strong>.</div></div>
     </div>
@@ -322,9 +451,8 @@ tbody tr:last-child td{border-bottom:none}
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
       <button class="btn btn-p" onclick="connectFirebase()"><i class="fas fa-fire"></i> Conectar Firebase</button>
-      <button class="btn btn-s" onclick="goLocal()"><i class="fas fa-laptop"></i> Solo local (este dispositivo)</button>
+      <button class="btn btn-s" onclick="document.getElementById('fb-cfg').style.display='none'">Cerrar</button>
     </div>
-    <p style="font-size:.73rem;color:var(--muted);margin-top:10px">Modo local: datos guardados en este navegador. No se sincronizan entre dispositivos.</p>
   </div>
 </div>
 
@@ -357,7 +485,7 @@ tbody tr:last-child td{border-bottom:none}
     <div class="sb-sec">Cobranza</div>
     <div class="ni" onclick="gv('morosos')"><i class="fas fa-exclamation-circle"></i> Morosos y Recargos <span class="nb" id="nb-mor" style="display:none">0</span></div>
     <div class="sb-sec">Config</div>
-    <div class="ni" onclick="document.getElementById('fb-cfg').style.display='flex'"><i class="fas fa-fire"></i> Firebase</div>
+    <div class="ni" id="ni-salir" style="display:none" onclick="cerrarSesion()"><i class="fas fa-sign-out-alt"></i> Cerrar sesión</div>
   </div>
   <div class="sb-foot">
     <div class="av" id="sb-avatar">H</div>
@@ -367,6 +495,10 @@ tbody tr:last-child td{border-bottom:none}
     </div>
   </div>
 </nav>
+<!-- Aviso fijo de cobros por revisar (rechazados por la nube o posible cobro doble) -->
+<button id="rev-badge" class="err-badge rev-badge" onclick="abrirRevision()" hidden title="Cobros por revisar"><i class="fas fa-exclamation-triangle"></i> <span id="rev-count">0</span> cobros por revisar</button>
+<!-- Aviso fijo de errores silenciosos (fuera del sidebar para que siempre se vea) -->
+<button id="err-badge" class="err-badge" onclick="abrirErrores()" hidden title="Ver errores registrados"><i class="fas fa-bug"></i> <span id="err-count">0</span> errores</button>
 
 <!-- MAIN -->
 <div id="main">
@@ -611,13 +743,13 @@ tbody tr:last-child td{border-bottom:none}
       </div>
       <div class="fg"><label id="lbl-pq">Pago Quincenal</label><input class="fc" id="f-pq" readonly placeholder="Calculado" style="color:var(--accent)"></div>
       <div class="fg"><label>Fecha Inicio</label><input class="fc" type="date" id="f-ini"></div>
-      <div class="fg" id="fg-pagadas"><label id="lbl-pag">Q ya Pagadas</label><input class="fc" type="number" id="f-pag" value="0" min="0"></div>
+      <div class="fg" id="fg-pagadas"><label id="lbl-pag">Q ya Pagadas</label><input class="fc" type="number" id="f-pag" value="0" min="0" step="1" inputmode="numeric"></div>
       <div class="fg full"><label>WhatsApp (10 dígitos)</label><input class="fc" id="f-tel" placeholder="5512345678"></div>
       <div class="fg full"><label>Notas</label><textarea class="fc" id="f-notas" rows="2" placeholder="Observaciones..."></textarea></div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;flex-wrap:wrap">
       <button class="btn btn-s" onclick="cm('m-cliente')">Cancelar</button>
-      <button class="btn btn-p" onclick="saveC()"><i class="fas fa-save"></i> Guardar</button>
+      <button class="btn btn-p" id="btn-save-c" onclick="saveC()"><i class="fas fa-save"></i> Guardar</button>
     </div>
   </div>
 </div>
@@ -630,6 +762,45 @@ tbody tr:last-child td{border-bottom:none}
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button class="btn btn-s" onclick="cm('m-confirm')">Cancelar</button>
       <button class="btn btn-d" id="conf-ok"><i class="fas fa-trash"></i> Eliminar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirmar restauración de respaldo -->
+<div class="overlay" id="m-restaurar" role="dialog" aria-modal="true" aria-label="Confirmar restauración">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-upload" style="color:var(--warn);margin-right:8px"></i>Restaurar respaldo</div><button class="btn-x" onclick="cm('m-restaurar')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
+    <p style="font-size:.87rem;margin-bottom:20px;white-space:pre-line" id="rest-msg"></p>
+    <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-s" id="rest-cancel" onclick="cm('m-restaurar')">Cancelar</button>
+      <button class="btn btn-d" id="rest-ok"><i class="fas fa-upload"></i> Sí, restaurar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cobros por revisar -->
+<div class="overlay" id="m-revq" role="dialog" aria-modal="true" aria-label="Cobros por revisar">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-exclamation-triangle" style="color:var(--warn);margin-right:8px"></i>Cobros por revisar</div><button class="btn-x" onclick="cm('m-revq')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
+    <p style="color:var(--muted);font-size:.8rem;margin-bottom:12px">Cobros hechos en este teléfono que no se subieron a la nube, o que la nube ya tenía (posible cobro doble). Revisa cada uno con el acreditado. También se incluyen en el respaldo JSON y en el Excel.</p>
+    <div id="revq-body"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn btn-s" onclick="cm('m-revq')">Cerrar</button></div>
+  </div>
+</div>
+
+<!-- Errores registrados -->
+<div class="overlay" id="m-errores" role="dialog" aria-modal="true" aria-label="Errores registrados">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-bug" style="color:var(--danger);margin-right:8px"></i>Errores registrados</div><button class="btn-x" onclick="cm('m-errores')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
+    <p style="color:var(--muted);font-size:.8rem;margin-bottom:12px">Se guardan solo en este dispositivo (últimos 50). Toma captura si necesitas reportarlos.</p>
+    <div id="err-body"></div>
+    <div class="rsc-sec" style="margin-top:12px">
+      <p id="esp-info" style="font-size:.78rem;color:var(--muted)"></p>
+      <button class="btn btn-s btn-sm" id="esp-borrar" onclick="borrarCopiasDescargadas()" hidden style="margin-top:6px"></button>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;flex-wrap:wrap">
+      <button class="btn btn-s" onclick="limpiarErrores()"><i class="fas fa-broom"></i> Limpiar</button>
+      <button class="btn btn-s" onclick="cm('m-errores')">Cerrar</button>
     </div>
   </div>
 </div>
@@ -679,12 +850,18 @@ tbody tr:last-child td{border-bottom:none}
   </div>
 </div>
 
-<script src="js/datos.js"></script>
-<script src="js/sync.js"></script>
-<script src="js/negocio.js"></script>
-<script src="js/ui.js"></script>
-<script src="js/export.js"></script>
-<script src="js/app.js"></script>
+<!-- ?v= debe coincidir con HD_VERSION (arriba), sw.js y js/app.js -->
+<script src="js/datos.js?v=20261105"></script>
+<!-- Configuración del Firebase real: solo en la app publicada (el sitio de
+     prueba no lo incluye; sin él, la app se detiene con un error claro) -->
+<script src="js/config-real.js?v=20261105"></script>
+<script src="js/sesion.js?v=20261105"></script>
+<script src="js/sync.js?v=20261105"></script>
+<script src="js/negocio.js?v=20261105"></script>
+<script src="js/ui.js?v=20261105"></script>
+<script src="js/export.js?v=20261105"></script>
+<script src="js/rescate.js?v=20261105"></script>
+<script src="js/app.js?v=20261105"></script>
 </body>
 </html>
 

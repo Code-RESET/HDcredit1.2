@@ -1,32 +1,47 @@
 /* ============================================================
    FIREBASE (lazy load)
 ============================================================ */
+// La configuración es fija: js/config-real.js en producción y
+// firebase-prueba.local.js en modo prueba. No se acepta una pegada a mano.
 function connectFirebase() {
-  const raw = document.getElementById('fb-input').value.trim();
-  let cfg;
-  try {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) { toast('No se encontró configuración válida', 'err'); return; }
-    let json = match[0];
-    // Unquoted keys: apiKey: => "apiKey":
-    json = json.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
-    // Curly/smart quotes => straight quotes
-    json = json.replace(/[“”„‟‘’]/g, '"');
-    // Trailing commas
-    json = json.replace(/,\s*}/g, '}');
-    cfg = JSON.parse(json);
-    if (!cfg.apiKey || !cfg.projectId) { toast('Falta apiKey o projectId', 'err'); return; }
-  } catch(e) {
-    toast('Error: ' + e.message, 'err'); return;
-  }
-  localStorage.setItem('hd_fb', JSON.stringify(cfg));
-  loadFirebaseSDK(cfg);
+  toast(MODO_PRUEBA
+    ? 'Modo prueba: la configuración se toma de js/firebase-prueba.local.js'
+    : 'La configuración de la app es fija y no se puede cambiar desde aquí.', 'err');
 }
 
-function loadFirebaseSDK(cfg) {
+// opts.rescate: conexión para el rescate — no arranca la sincronización y,
+// si falla, no cambia de modo (el rescate decide). Devuelve true/false.
+// opts.soloSesion: carga el SDK, espera el login y la confirmación de la
+// nube; no sincroniza ni carga datos. Si el SDK no carga, se queda en la
+// pantalla de login (sin SDK no se sabe quién es el usuario: no se muestra nada).
+function loadFirebaseSDK(cfg, opts = {}) {
+  return new Promise(resolve => _loadFirebaseSDK(cfg, opts, resolve));
+}
+function _loadFirebaseSDK(cfg, opts, resolve) {
+  // Defensa extra: el modo prueba nunca toca el proyecto real
+  if (MODO_PRUEBA && esProyectoReal(cfg)) {
+    bloquearInicio('Modo prueba se niega a iniciar: la configuración apunta al proyecto REAL de HD Crédit.');
+    resolve(false);
+    return;
+  }
+  const fallar = (msg) => {
+    reportarError('Conectar Firebase', new Error(msg));
+    if (opts.soloSesion) {
+      mostrarLogin(msg + ' Sin el inicio de sesión no se muestran datos, pero lo guardado en este teléfono se conserva. Conéctate a internet y toca Reintentar.', 'err');
+      formularioLogin(false);
+      botonReintentar(true);
+      resolve(false);
+      return;
+    }
+    if (!opts.rescate) {
+      toast(msg + ' Se trabaja en este dispositivo hasta reconectar.', 'err');
+      modoLocalTemporal(msg);
+    }
+    resolve(false);
+  };
   // No reinyectar los <script> del SDK si ya están cargados (evita duplicados
   // al reconectar Firebase más de una vez en la misma sesión)
-  if (window.firebase && typeof firebase.firestore === 'function') { initFB(cfg); return; }
+  if (window.firebase && typeof firebase.firestore === 'function') { initFB(cfg, opts).then(resolve); return; }
 
   function loadScript(src) {
     return new Promise((resolve, reject) => {
@@ -41,18 +56,16 @@ function loadFirebaseSDK(cfg) {
 
   let settled = false;
   // Si la red va lenta o se traba, no dejar la app esperando indefinidamente:
-  // a los 12s se cae a modo local en vez de quedarse en blanco
+  // a los 12s se trabaja en local SOLO por esta sesión (no se guarda como
+  // modo permanente: el siguiente arranque vuelve a intentar la nube)
   const timeoutId = setTimeout(() => {
     if (settled) return;
     settled = true;
-    toast('Firebase tardó demasiado en responder. Usando modo local.', 'err');
-    goLocal();
+    fallar('Firebase tardó demasiado en responder.');
   }, 12000);
 
-  // Se vuelve a cargar el SDK de Auth (además de app + firestore), pero SOLO
-  // para inicio de sesión anónimo y silencioso (sin ventana emergente, sin
-  // pantalla de Google) — ver authAnonimo() más abajo. No es el login
-  // interactivo que se quitó antes.
+  // SDK de Auth: login con correo y contraseña en la pantalla de la app
+  // (sin ventanas emergentes ni Google) — ver js/sesion.js.
   loadScript('https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js')
     .then(() => loadScript('https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js'))
     .then(() => loadScript('https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js'))
@@ -60,68 +73,68 @@ function loadFirebaseSDK(cfg) {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
-      initFB(cfg);
+      initFB(cfg, opts).then(resolve);
     })
     .catch(() => {
       if (settled) return;
       settled = true;
       clearTimeout(timeoutId);
-      toast('No se pudo cargar Firebase SDK. Usando modo local.', 'err');
-      goLocal();
+      fallar('No se pudo cargar Firebase SDK.');
     });
 }
 
-// Sin login interactivo: todos los dispositivos comparten la misma ruta de
-// datos (usuarios/compartido/...). Antes esto solo estaba protegido por
-// reglas de Firestore abiertas a cualquiera; ahora cada dispositivo se
-// autentica solo (ver authAnonimo), para poder exigir "if request.auth !=
-// null" en las reglas sin volver a pedirle nada al usuario.
+// Todos los usuarios autorizados comparten la misma ruta de datos
+// (usuarios/compartido/...). Quién entra lo deciden el login (js/sesion.js)
+// y las reglas de Firestore (firestore.rules: solo UID autorizados).
 const UID_COMPARTIDO = 'compartido';
+let _persistenciaPedida = false;
+let _hayEscriturasPendientes = false; // último estado conocido del SDK (snap.metadata)
 
-// Inicia sesión anónima en segundo plano: identifica el dispositivo ante
-// Firestore SIN pedir nada al usuario (sin ventana, sin popup, sin Google).
-// Sirve para poder exigir "if request.auth != null" en las reglas de
-// Firestore en vez de dejarlas abiertas a cualquiera. Si falla o tarda, la
-// app sigue funcionando igual que hasta ahora (no bloquea nada) — solo
-// importa una vez que las reglas del proyecto se actualicen para exigirlo.
-function authAnonimo() {
-  return new Promise(resolve => {
-    let settled = false;
-    const t = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      console.warn('HD Crédit — auth anónima tardó demasiado, se continúa sin esperar más');
-      resolve(false);
-    }, 8000);
-    firebase.auth().signInAnonymously()
-      .then(() => { if (settled) return; settled = true; clearTimeout(t); resolve(true); })
-      .catch(e => { if (settled) return; settled = true; clearTimeout(t); console.warn('HD Crédit — auth anónima falló:', e.code || e.message); resolve(false); });
-  });
+// Abre Firestore una sola vez. Persistencia offline: la app sigue
+// funcionando sin internet y lo que se haga sin conexión sube solo al
+// volver la señal. Se pide antes de cualquier otro uso de Firestore.
+function abrirFirestore() {
+  if (!DB) DB = firebase.firestore();
+  if (!_persistenciaPedida) {
+    _persistenciaPedida = true;
+    DB.enablePersistence({synchronizeTabs: true}).catch(e => {
+      // Sin persistencia, un cobro hecho sin señal se pierde al cerrar la app
+      reportarError('Persistencia offline no disponible', e);
+    });
+  }
+  return DB;
 }
 
-async function initFB(cfg) {
+async function initFB(cfg, opts = {}) {
   try {
     if (!firebase.apps.length) firebase.initializeApp(cfg);
-    DB = firebase.firestore();
+    // Nada de datos antes de tener sesión Y de que la nube confirme el UID
+    await asegurarSesion();
+    abrirFirestore();
+    if (!(await verificarAcceso())) return false;
+    if (opts.soloSesion) return true;
     USE_FB = true;
     document.getElementById('fb-cfg').style.display = 'none';
     CURRENT_UID = UID_COMPARTIDO;
-    // Persistencia offline: la app sigue funcionando sin internet (lee de la
-    // copia local en el dispositivo) y los cobros que se hagan sin conexión
-    // se guardan en cola y se suben solos en cuanto vuelve la señal
-    DB.enablePersistence({synchronizeTabs: true}).catch(e => {
-      console.warn('HD Crédit — persistencia offline no disponible:', e.code);
-    });
     // El estado real (sincronizado / local / subiendo) lo decide startFBSync()
     // a partir de snap.metadata, que refleja la conexión real con Firestore
     // (más confiable que navigator.onLine, que solo mira la red del dispositivo)
+    // En rescate todavía NO se sincroniza: la sincronización reemplazaría
+    // los datos locales antes de compararlos
+    if (opts.rescate) return true;
+    _modoLocalTemporal = false;
+    const banner = document.getElementById('banner-sinsync');
+    if (banner) banner.hidden = true;
     setSyncLbl(navigator.onLine ? 'ok' : 'local');
-    await authAnonimo();
     startFBSync();
+    return true;
   } catch(e) {
-    console.error(e);
+    reportarError('Iniciar Firebase', e);
     toast('Error Firebase: ' + e.message, 'err');
-    goLocal();
+    USE_FB = false;
+    if (opts.soloSesion) { mostrarLogin('Error al iniciar Firebase: ' + e.message, 'err'); return false; }
+    if (!opts.rescate) modoLocalTemporal('Error al iniciar Firebase');
+    return false;
   }
 }
 
@@ -132,7 +145,8 @@ function HIST() { return DB.collection('usuarios').doc(CURRENT_UID).collection('
 function setSyncLbl(estado) {
   const el = document.getElementById('sync-lbl');
   if (!el) return;
-  if (estado === 'local') { el.textContent = '🟡 Sin internet — guardando en el dispositivo'; el.style.color = 'var(--warn)'; }
+  if (estado === 'sin-sync') { el.textContent = '🔴 SIN SINCRONIZAR — solo en este teléfono'; el.style.color = 'var(--danger)'; }
+  else if (estado === 'local') { el.textContent = '🟡 Sin internet — guardando en el dispositivo'; el.style.color = 'var(--warn)'; }
   else if (estado === 'pendiente') { el.textContent = '🟡 Cambios guardados — subiendo…'; el.style.color = 'var(--warn)'; }
   else if (estado === 'error') { el.textContent = '🔴 Desconectado — reintentando…'; el.style.color = 'var(--danger)'; }
   else { el.textContent = '🟢 Sincronizado'; el.style.color = 'var(--accent)'; }
@@ -149,18 +163,32 @@ function startFBSync() {
     // Se confía siempre en el snapshot (incluye listas vacías reales, p.ej.
     // al eliminar el último acreditado) — antes se descartaba ese caso y la
     // pantalla quedaba con datos obsoletos
-    clientes = snap.docs.map(d => ({id: d.id, ...d.data()}));
+    // Los cobros en cola (hechos sin red) se superponen: la pantalla no los
+    // "olvida" mientras no suben
+    clientes = aplicarColaSobre(snap.docs.map(d => ({id: d.id, ...d.data()})));
     syncAlertas();
-    localStorage.setItem('hd_c', JSON.stringify(clientes));
+    // Con el almacenamiento lleno, setItem lanza: se registra pero la
+    // pantalla se actualiza igual (antes el error cortaba el refresh)
+    try { localStorage.setItem('hd_c', JSON.stringify(clientes)); }
+    catch(e) { reportarError('Guardar copia local de acreditados', e); }
     refresh();
     // metadata.fromCache: se está mostrando la copia local (sin red);
     // metadata.hasPendingWrites: hay cobros hechos aquí que aún no suben
+    const enCola = leerCola().length;
+    _hayEscriturasPendientes = !!snap.metadata.hasPendingWrites;
     if (snap.metadata.fromCache) setSyncLbl('local');
-    else if (snap.metadata.hasPendingWrites) setSyncLbl('pendiente');
+    else if (snap.metadata.hasPendingWrites || enCola) setSyncLbl('pendiente');
     else setSyncLbl('ok');
+    if (!snap.metadata.fromCache) {
+      // Momento de la última copia confirmada por la nube: el rescate lo usa
+      // para saber si un acreditado que falta fue borrado en otro teléfono
+      try { localStorage.setItem('hd_ultima_sync', new Date().toISOString()); } catch(e) {}
+      if (enCola) procesarColaCobros();
+    }
   }, err => {
-    console.error('HD Crédit — error de sincronización (clientes):', err);
+    reportarError('Sincronización de acreditados', err);
     setSyncLbl('error');
+    if (err && err.code === 'permission-denied') { accesoRevocado(); return; }
     if (Date.now() - _errToastAt > 30000) { _errToastAt = Date.now(); toast('Error de sincronización: ' + err.message, 'err'); }
   });
   // En vivo solo se sincroniza lo reciente (ventana de tiempo, no un conteo
@@ -178,23 +206,61 @@ function startFBSync() {
     renderCL();
     renderDash();
   }, err => {
-    console.error('HD Crédit — error de sincronización (historial):', err);
+    reportarError('Sincronización de historial', err);
+    if (err && err.code === 'permission-denied') { accesoRevocado(); return; }
     if (Date.now() - _errToastAt > 30000) { _errToastAt = Date.now(); toast('Error de sincronización: ' + err.message, 'err'); }
   });
 }
 
-function goLocal() {
-  localStorage.setItem('hd_fb', 'local');
+// (El modo "Solo local" elegido a mano se quitó: entraba sin login. Un
+// teléfono que lo usaba ahora inicia sesión y pasa por el rescate; sus
+// datos locales se conservan.)
+
+// Datos (nube o copia local) solo con un acceso confirmado. Única
+// excepción: las pruebas automáticas (navigator.webdriver), que corren el
+// modo local sin Firebase — ver arrancarConexion().
+let _modoLocalAutomatizado = false;
+function puedeVerDatos() { return _autorizado || _modoLocalAutomatizado; }
+
+// Modo local por FALLO (red lenta, SDK que no carga…): solo por esta
+// sesión. No se guarda 'local'; el siguiente arranque reintenta la nube.
+// Lo que se cobre mientras tanto queda en el teléfono y, al reconectar,
+// pasa por el rescate (ver rescate.js) en vez de ser reemplazado.
+let _modoLocalTemporal = false;
+function modoLocalTemporal(motivo) {
+  USE_FB = false;
+  _modoLocalTemporal = true;
   document.getElementById('fb-cfg').style.display = 'none';
   loadLocal();
+  setSyncLbl('sin-sync');
+  mostrarBannerSinSync(motivo);
+}
+
+function mostrarBannerSinSync(motivo) {
+  const b = document.getElementById('banner-sinsync');
+  if (!b) return;
+  const t = document.getElementById('banner-sinsync-txt');
+  if (t) t.textContent = '⚠️ SIN SINCRONIZAR — lo que hagas se guarda solo en este teléfono' + (motivo ? ' (' + motivo + ')' : '');
+  b.hidden = false;
+}
+
+function hayDatosLocales() {
+  try {
+    const c = JSON.parse(localStorage.getItem('hd_c') || '[]');
+    const h = JSON.parse(localStorage.getItem('hd_h') || '[]');
+    return (Array.isArray(c) && c.length > 0) || (Array.isArray(h) && h.length > 0);
+  } catch(e) { return true; } // ante la duda, proteger
 }
 
 /* ============================================================
    PAGINACIÓN DE HISTORIAL
 ============================================================ */
 function mergeHistorial() {
-  historial = _histReciente.concat(_histAntiguo);
-  localStorage.setItem('hd_h', JSON.stringify(historial));
+  const ids = new Set(_histReciente.map(h => h.id).concat(_histAntiguo.map(h => h.id)));
+  const pendientes = movimientosEnCola().filter(h => !ids.has(h.id)).reverse();
+  historial = pendientes.concat(_histReciente, _histAntiguo);
+  try { localStorage.setItem('hd_h', JSON.stringify(historial)); }
+  catch(e) { reportarError('Guardar copia local de historial', e); }
 }
 
 // Trae la siguiente página de historial viejo (fuera de la ventana en vivo).
@@ -250,10 +316,21 @@ function syncAlertas() {
     if (alerta !== (c.alerta || '')) { changed = true; return {...c, alerta}; }
     return c;
   });
-  if (changed) saveLocal();
+  // Recalcular alertas no es un cambio del usuario: se guarda sin marcar
+  // "rescate pendiente"
+  if (changed) {
+    try { localStorage.setItem('hd_c', JSON.stringify(clientes)); }
+    catch(e) { reportarError('Guardar alertas en el dispositivo', e); }
+  }
 }
 
 function loadLocal() {
+  // Candado: la copia del teléfono solo se muestra con un acceso confirmado
+  if (!puedeVerDatos()) {
+    clientes = []; historial = [];
+    mostrarLogin('No se puede mostrar la copia de este teléfono sin un acceso confirmado.', 'err');
+    return;
+  }
   try { clientes = JSON.parse(localStorage.getItem('hd_c') || '[]'); }
   catch(e) { clientes = []; toast('⚠️ Datos corruptos en almacenamiento local — se inició vacío. Restaura un respaldo JSON.', 'err'); }
   try { historial = JSON.parse(localStorage.getItem('hd_h') || '[]'); }
@@ -269,7 +346,7 @@ function loadLocal() {
           toast('Datos recuperados del respaldo automático (' + new Date(bk.ts).toLocaleDateString() + ') ✅', 'ok');
           break;
         }
-      } catch(e) { /* respaldo corrupto, ignorar */ }
+      } catch(e) { reportarError('Leer respaldo automático ' + bkKey, e); }
     }
   }
   syncAlertas();
@@ -280,75 +357,13 @@ function saveLocal() {
   try {
     localStorage.setItem('hd_c', JSON.stringify(clientes));
     localStorage.setItem('hd_h', JSON.stringify(historial));
+    // Un cambio hecho en modo local temporal debe rescatarse antes de
+    // volver a sincronizar (si no, la nube lo reemplazaría)
+    if (_modoLocalTemporal) localStorage.setItem('hd_rescate_pendiente', '1');
   } catch(e) {
+    reportarError('Guardar en el dispositivo', e);
     toast('⚠️ Almacenamiento lleno — exporta un respaldo JSON ahora para no perder datos', 'err');
   }
 }
 
-/* ============================================================
-   SEED DATA (from your Excel file)
-============================================================ */
-function xlDate(n) {
-  if (!n) return '';
-  const d = new Date(Math.round((n - 25569) * 86400 * 1000));
-  return d.toISOString().split('T')[0];
-}
-
-function seedData() {
-  const raw = [
-    {n:'IVON',m:8000,pq:1067,nq:12,ini:45976,pg:12,s:0,a:''},
-    {n:'E.NANCY',m:5000,pq:667,nq:12,ini:45976,pg:12,s:0,a:''},
-    {n:'YISEL',m:8000,pq:1200,nq:10,ini:46021,pg:10,s:0,a:''},
-    {n:'TREJO',m:6000,pq:800,nq:12,ini:46006,pg:12,s:0,a:''},
-    {n:'GABI',m:4000,pq:604,nq:10,ini:45991,pg:10,s:0,a:''},
-    {n:'H/TERE',m:5000,pq:751,nq:10,ini:46006,pg:10,s:0,a:''},
-    {n:'JOSE LUIS',m:5000,pq:900,nq:8,ini:46127,pg:2,s:5400,a:'ATRASADO'},
-    {n:'ANDREA',m:4000,pq:601,nq:10,ini:46037,pg:10,s:0,a:''},
-    {n:'SAHIRA',m:5000,pq:667,nq:12,ini:46037,pg:8,s:2668,a:'ATRASADO'},
-    {n:'SAM',m:8000,pq:1067,nq:12,ini:46037,pg:8,s:4268,a:'ATRASADO'},
-    {n:'JASIEL',m:10000,pq:1501,nq:10,ini:46052,pg:8,s:3002,a:''},
-    {n:'PERLA 12Q',m:12000,pq:1600,nq:12,ini:46052,pg:10,s:3200,a:''},
-    {n:'JESUS 71',m:5000,pq:751,nq:10,ini:46052,pg:7,s:2253,a:''},
-    {n:'LORENA',m:15000,pq:2001,nq:12,ini:46052,pg:7,s:10005,a:''},
-    {n:'ERIKA',m:15000,pq:2001,nq:12,ini:46068,pg:6,s:12006,a:'ATRASADO'},
-    {n:'VERONICA',m:5000,pq:751,nq:10,ini:46068,pg:7,s:2253,a:''},
-    {n:'ESTELA',m:5000,pq:667,nq:12,ini:46068,pg:6,s:4002,a:'ATRASADO'},
-    {n:'MARI TERE',m:3000,pq:650,nq:6,ini:46068,pg:5,s:650,a:'ATRASADO'},
-    {n:'DIOSDADO',m:10000,pq:1334,nq:12,ini:46068,pg:6,s:8004,a:'ATRASADO'},
-    {n:'JULIA',m:5000,pq:667,nq:12,ini:46081,pg:5,s:4669,a:'ATRASADO'},
-    {n:'VIVIANA',m:5000,pq:667,nq:12,ini:46081,pg:5,s:4669,a:'ATRASADO'},
-    {n:'PAULINA',m:5000,pq:751,nq:10,ini:46081,pg:4,s:4506,a:'ATRASADO'},
-    {n:'OLGA',m:2000,pq:467,nq:6,ini:46081,pg:5,s:467,a:'ATRASADO'},
-    {n:'JOSE LUIS 2',m:5000,pq:900,nq:8,ini:46096,pg:4,s:3600,a:'ATRASADO'},
-    {n:'GISEL',m:5000,pq:1083,nq:6,ini:46111,pg:3,s:3249,a:'ATRASADO'},
-    {n:'VANE',m:7000,pq:1050,nq:10,ini:46111,pg:3,s:7350,a:'ATRASADO'},
-    {n:'PERLA 7K',m:7000,pq:934,nq:12,ini:46111,pg:4,s:7472,a:''},
-    {n:'ROXANA',m:6000,pq:800,nq:12,ini:46127,pg:2,s:8000,a:'ATRASADO'},
-    {n:'E.NANCY 2',m:4000,pq:722,nq:8,ini:46127,pg:2,s:4332,a:'ATRASADO'},
-    {n:'JAZ',m:4000,pq:534,nq:12,ini:46127,pg:2,s:5340,a:'ATRASADO'},
-    {n:'YISEL 2',m:8000,pq:1200,nq:10,ini:46142,pg:1,s:10800,a:'ATRASADO'},
-    {n:'TERE',m:7000,pq:1264,nq:8,ini:46142,pg:1,s:8848,a:'ATRASADO'},
-    {n:'ABRIL',m:5000,pq:900,nq:8,ini:46142,pg:1,s:6300,a:'ATRASADO'},
-    {n:'JOSE LUIS 3',m:4000,pq:722,nq:8,ini:46143,pg:1,s:5054,a:'ATRASADO'},
-    {n:'ANGEL C.',m:15000,pq:2601,nq:8,ini:46143,pg:1,s:18207,a:'ATRASADO'},
-    {n:'MARI TERE 2',m:5000,pq:1083,nq:6,ini:46157,pg:0,s:6498,a:'ATRASADO'},
-    {n:'DANIEL',m:6000,pq:800,nq:12,ini:46157,pg:0,s:9600,a:'ATRASADO'},
-    {n:'LUISA',m:6000,pq:1300,nq:6,ini:46157,pg:0,s:7800,a:'ATRASADO'},
-    {n:'TREJO 2',m:8000,pq:1067,nq:12,ini:46172,pg:0,s:12804,a:''},
-    {n:'MAMA DE SAM',m:8000,pq:1067,nq:12,ini:46172,pg:0,s:12804,a:''},
-    {n:'ANDREA 2',m:6000,pq:800,nq:12,ini:46172,pg:0,s:9600,a:''},
-    {n:'NAYE',m:6000,pq:800,nq:12,ini:46172,pg:0,s:9600,a:''},
-    {n:'JESY',m:4000,pq:722,nq:8,ini:0,pg:0,s:5776,a:''},
-    {n:'H/TERE 2',m:6000,pq:900,nq:10,ini:46172,pg:0,s:9000,a:''},
-  ];
-  clientes = raw.map((r, i) => ({
-    id: 'c_' + i + '_' + Date.now(),
-    nombre: r.n, monto: r.m, pq: r.pq, nq: r.nq,
-    inicio: xlDate(r.ini), pagadas: r.pg, saldo: r.s,
-    alerta: r.a, telefono: '', notas: '',
-    pagos: Array(r.nq).fill(false).map((_,j) => j < r.pg),
-    createdAt: new Date().toISOString()
-  }));
-  saveLocal();
-}
 

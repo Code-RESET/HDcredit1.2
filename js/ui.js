@@ -402,13 +402,15 @@ function calcVenc(inicio, nq, producto = 'quincenal_fijo') {
 async function initPago(cid, qIdx) {
   const key = cid + '_' + qIdx;
   const btn = document.querySelector(`[data-pago="${key}"]`);
+  // Botón bloqueado mientras se procesa un movimiento de este acreditado
+  if (cobroEnCurso(cid)) return;
   if (_pendingPago[key]) {
     // segundo toque — confirmar
     clearTimeout(_pendingPago[key]);
     delete _pendingPago[key];
-    if (btn) { btn.classList.remove('confirming'); btn.innerHTML = _pendingOrigHtml[key] || ''; }
+    if (btn) { btn.classList.remove('confirming'); btn.innerHTML = _pendingOrigHtml[key] || ''; btn.disabled = true; }
     delete _pendingOrigHtml[key];
-    await togglePago(cid, qIdx);
+    await registrarCobro(cid, qIdx, 'PAGO');
   } else {
     // primer toque — pedir confirmación visual
     if (!btn) return;
@@ -444,12 +446,23 @@ function showUndo(nombre, wasPago) {
 
 async function undoLastPago() {
   if (!_lastPago) return;
+  const { cid, qIdx, accion, qKey } = _lastPago;
+  _lastPago = null;
   const bar = document.getElementById('undo-bar');
   if (bar) { clearTimeout(Number(bar.dataset.timer)); bar.remove(); }
-  _undoing = true;
-  try { await togglePago(_lastPago.cid, _lastPago.qIdx); } finally { _undoing = false; }
-  _lastPago = null;
-  toast('↩️ Acción deshecha', 'wrn');
+  // Deshacer = la acción contraria explícita (no "invertir" a ciegas)
+  const inversa = accion === 'PAGO' ? 'REVERSO' : 'PAGO';
+  const res = await registrarCobro(cid, qIdx, inversa, { qKey, sinDeshacer: true, silencioso: true });
+  if (res.ok) {
+    toast(res.estado === 'pendiente' ? '↩️ Acción deshecha — pendiente de subir a la nube' : '↩️ Acción deshecha', 'wrn');
+  } else if (res.motivo === 'sin_cambio') {
+    toast('No se deshizo: esa quincena ya había cambiado (otro dispositivo)', 'wrn');
+  } else if (res.motivo === 'ocupado') {
+    _lastPago = { cid, qIdx, accion, qKey }; // se puede reintentar
+  } else {
+    toast('❌ No se pudo deshacer — el movimiento sigue registrado', 'err');
+  }
+  return res;
 }
 
 /* ============================================================
@@ -491,7 +504,9 @@ function renderCL() {
       <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
         ${isPaid
           ?`<button class="pb2 ck" onclick="openReverso('${c.id}')" title="Cobrado · clic para retroceder pago"><i class="fas fa-check"></i></button>`
-          :`<button class="pb2 ${cls}" data-pago="${c.id}_${nextQIdx}" onclick="initPago('${c.id}',${nextQIdx})" title="Toca 2 veces para cobrar"><i class="${ico}"></i></button>`}
+          :cobroEnCurso(c.id)
+            ?`<button class="pb2 ${cls}" data-pago="${c.id}_${nextQIdx}" disabled title="Procesando…"><i class="fas fa-spinner fa-spin"></i></button>`
+            :`<button class="pb2 ${cls}" data-pago="${c.id}_${nextQIdx}" onclick="initPago('${c.id}',${nextQIdx})" title="Toca 2 veces para cobrar"><i class="${ico}"></i></button>`}
         <button class="pb2 u" onclick="openReporte('${c.id}')" title="Morosos y Recargos" style="width:30px;height:30px;font-size:.72rem"><i class="fas fa-clipboard-list" style="color:var(--purple)"></i></button>
         <button class="pb2 u" onclick="openReverso('${c.id}')" title="Retroceder pago" style="width:30px;height:30px;font-size:.72rem"><i class="fas fa-undo" style="color:var(--danger)"></i></button>
         <button class="pb2 u" onclick="openEC('${c.id}')" title="Estado de cuenta" style="width:30px;height:30px;font-size:.72rem"><i class="fas fa-file-invoice" style="color:var(--info)"></i></button>

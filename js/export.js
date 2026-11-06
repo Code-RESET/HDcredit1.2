@@ -8,7 +8,7 @@ function doExport() {
   const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));
-  a.download = 'HDCredit_' + new Date().toISOString().split('T')[0] + '.csv';
+  a.download = 'HDCredit_' + fechaLocalISO() + '.csv';
   a.click();
   toast('Exportado CSV ✅', 'ok');
 }
@@ -70,7 +70,24 @@ async function _generateXLSX() {
     XLSX.utils.book_append_sheet(wb, ws2, 'Historial');
   }
 
-  const fname = 'HDCredit_' + new Date().toISOString().split('T')[0] + '.xlsx';
+  // Hoja 3: cobros que solo existen en este teléfono (en cola / por revisar)
+  const soloTelefono = [
+    ...leerCola().map(it => ({ ...it, estado: 'Pendiente de subir', motivo: '' })),
+    ...leerRevision().map(it => ({ ...it, estado: it.tipo === 'fallido' ? 'No se subió' : 'Por revisar' })),
+  ];
+  if (soloTelefono.length) {
+    const ws3 = XLSX.utils.aoa_to_sheet([
+      ['Acreditado', 'Quincena', 'Tipo', 'Monto', 'Fecha', 'Hora', 'Estado', 'Motivo'],
+      ...soloTelefono.map(it => [
+        (it.log && it.log.nombre) || it.cid, Number.isInteger(it.qIdx) ? it.qIdx + 1 : '', it.accion,
+        (it.log && it.log.monto) || 0, (it.log && it.log.fecha) || '', (it.log && it.log.hora) || '', it.estado, it.motivo || ''
+      ])
+    ]);
+    ws3['!cols'] = [{wch:22},{wch:9},{wch:10},{wch:10},{wch:12},{wch:10},{wch:18},{wch:50}];
+    XLSX.utils.book_append_sheet(wb, ws3, 'Por revisar');
+  }
+
+  const fname = 'HDCredit_' + fechaLocalISO() + '.xlsx';
   XLSX.writeFile(wb, fname);
   toast('Excel descargado ✅', 'ok');
 }
@@ -180,10 +197,13 @@ async function doExportJSON() {
     try { historialCompleto = await obtenerHistorialCompleto(); }
     catch(e) { toast('No se pudo traer el historial completo, se respalda lo disponible: ' + e.message, 'wrn'); }
   }
-  const payload = { clientes, historial: historialCompleto, ts: new Date().toISOString(), v: '2.1' };
+  // Incluye también los cobros que solo existen en este teléfono: en cola
+  // (sin subir) y por revisar (rechazados o posible cobro doble)
+  const payload = { clientes, historial: historialCompleto, colaPendiente: leerCola(), cobrosPorRevisar: leerRevision(),
+                    ts: new Date().toISOString(), v: '2.1' };
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'}));
-  a.download = 'HDCredit_respaldo_' + new Date().toISOString().split('T')[0] + '.json';
+  a.download = 'HDCredit_respaldo_' + fechaLocalISO() + '.json';
   a.click();
   toast('Respaldo JSON descargado ✅', 'ok');
 }
@@ -198,39 +218,111 @@ function doImportJSON() {
     const reader = new FileReader();
     reader.onload = ev => {
       try {
-        const payload = JSON.parse(ev.target.result);
-        if (!payload.clientes || !Array.isArray(payload.clientes) || !payload.clientes.length) {
-          toast('Archivo inválido o sin clientes', 'err'); return;
-        }
-        // Validar estructura de cada cliente
-        const validos = payload.clientes.filter(c =>
-          c && typeof c === 'object'
-          && typeof c.nombre === 'string' && c.nombre.trim()
-          && Number.isFinite(c.nq) && c.nq > 0
-          && Number.isFinite(c.monto) && c.monto > 0
-          && Number.isFinite(c.pagadas)
-        );
-        const omitidos = payload.clientes.length - validos.length;
-        if (!validos.length) { toast('Archivo inválido: sin registros con estructura correcta', 'err'); return; }
-        const tsLabel = payload.ts ? new Date(payload.ts).toLocaleDateString('es-MX') : 'fecha desconocida';
-        const msg = `¿Importar ${validos.length} clientes del respaldo del ${tsLabel}?\n\nEsto reemplazará los datos actuales.`
-          + (omitidos ? `\n\n⚠️ Se omitirán ${omitidos} registros con datos inválidos.` : '');
-        if (!confirm(msg)) return;
-        autoBackup();
-        clientes = validos;
-        historial = Array.isArray(payload.historial) ? payload.historial : [];
-        historial.sort((a, b) => new Date(b.ts) - new Date(a.ts));
-        syncAlertas();
-        saveLocal();
-        refresh();
-        if (omitidos) toast(`${validos.length} clientes restaurados · ${omitidos} omitidos por datos inválidos`, 'wrn');
-        else toast(`${validos.length} clientes restaurados ✅`, 'ok');
+        prepararRestauracion(JSON.parse(ev.target.result));
       } catch(err) {
+        reportarError('Leer respaldo JSON', err);
         toast('Error al leer el archivo: ' + err.message, 'err');
       }
     };
     reader.readAsText(file);
   };
   input.click();
+}
+
+const ID_VALIDO = /^[\w-]{1,120}$/;
+function clienteImportadoValido(c) {
+  return !!(c && typeof c === 'object'
+    && typeof c.id === 'string' && ID_VALIDO.test(c.id)
+    && typeof c.nombre === 'string' && c.nombre.trim()
+    && Number.isFinite(c.nq) && c.nq > 0
+    && Number.isFinite(c.monto) && c.monto > 0
+    && Number.isFinite(c.pq) && c.pq >= 0
+    && Number.isFinite(c.pagadas) && c.pagadas >= 0 && c.pagadas <= c.nq
+    && (c.saldo === undefined || Number.isFinite(c.saldo))
+    && (c.pagos === undefined || Array.isArray(c.pagos)));
+}
+
+// Valida el archivo y muestra la confirmación. No escribe nada todavía.
+function prepararRestauracion(payload) {
+  if (!payload || !Array.isArray(payload.clientes) || !payload.clientes.length) {
+    toast('Archivo inválido o sin clientes', 'err'); return null;
+  }
+  const validos = payload.clientes.filter(clienteImportadoValido)
+    .map(c => ({ ...c, createdAt: c.createdAt || new Date().toISOString() }));
+  const omitidos = payload.clientes.length - validos.length;
+  if (!validos.length) { toast('Archivo inválido: sin registros con estructura correcta', 'err'); return null; }
+  const hist = (Array.isArray(payload.historial) ? payload.historial : [])
+    .filter(h => h && typeof h === 'object' && typeof h.clienteId === 'string'
+      && (h.qIndex === undefined || h.qIndex === null || Number.isInteger(h.qIndex))
+      && ['PAGO', 'REVERSO', 'AJUSTE'].includes(h.accion)
+      && (h.monto === undefined || Number.isFinite(h.monto)))
+    .map((h, i) => ({ ...h, id: (typeof h.id === 'string' && ID_VALIDO.test(h.id)) ? h.id : 'h_rest_' + Date.now() + '_' + i }));
+  const tsLabel = payload.ts ? new Date(payload.ts).toLocaleDateString('es-MX') : 'fecha desconocida';
+
+  const destino = USE_FB
+    ? 'Se guardará EN LA NUBE y lo verán TODOS los dispositivos.\nLos acreditados que no estén en el respaldo se eliminarán de la nube.\nEl historial del respaldo se agrega; no se borra historial existente.'
+    : 'Se guardará en este dispositivo y reemplazará los datos actuales.';
+  document.getElementById('rest-msg').textContent =
+    `¿Restaurar ${validos.length} acreditados y ${hist.length} movimientos del respaldo del ${tsLabel}?\n\n${destino}`
+    + (omitidos ? `\n\n⚠️ Se omitirán ${omitidos} registros con datos inválidos.` : '');
+  const ok = document.getElementById('rest-ok');
+  ok.disabled = false;
+  ok.onclick = async () => {
+    ok.disabled = true;
+    const exito = await restaurarRespaldo(validos, hist, omitidos);
+    ok.disabled = false;
+    if (exito) cm('m-restaurar');
+  };
+  om('m-restaurar');
+  return { validos, hist, omitidos };
+}
+
+function conTiempoLimite(promesa, ms, mensaje) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => { const e = new Error(mensaje); e.code = 'hd/timeout'; reject(e); }, ms);
+    promesa.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+  });
+}
+
+// Escribe el respaldo. En modo Firebase solo muestra éxito después de que
+// el servidor confirmó TODOS los lotes.
+async function restaurarRespaldo(validos, hist, omitidos = 0) {
+  autoBackup(); // copia de lo que había, en este dispositivo
+  if (!USE_FB) {
+    clientes = validos;
+    historial = hist.slice().sort((a, b) => new Date(b.ts) - new Date(a.ts));
+    syncAlertas();
+    saveLocal();
+    refresh();
+  } else {
+    let lotesOk = 0, totalLotes = 0;
+    try {
+      if (!navigator.onLine) throw new Error('Sin conexión: restaurar necesita internet para confirmar con la nube');
+      toast('Restaurando en la nube…', 'wa');
+      const actuales = await conTiempoLimite(CLI().get({ source: 'server' }), 30000, 'La nube no respondió al leer los acreditados actuales');
+      const idsRespaldo = new Set(validos.map(c => c.id));
+      // Orden: primero se escribe lo del respaldo y al final se borra lo que
+      // sobra — si algo falla a la mitad, nunca queda menos información.
+      const ops = [];
+      validos.forEach(c => ops.push(b => b.set(CLI().doc(c.id), { ...c, alerta: calcAlerta(c) })));
+      hist.forEach(h => ops.push(b => b.set(HIST().doc(h.id), h)));
+      actuales.docs.forEach(d => { if (!idsRespaldo.has(d.id)) ops.push(b => b.delete(d.ref)); });
+      const TAM = 450; // límite de Firestore: 500 operaciones por lote
+      totalLotes = Math.ceil(ops.length / TAM);
+      for (let i = 0; i < ops.length; i += TAM) {
+        const batch = DB.batch();
+        ops.slice(i, i + TAM).forEach(f => f(batch));
+        await conTiempoLimite(batch.commit(), 60000, 'La nube no confirmó la escritura a tiempo');
+        lotesOk++;
+      }
+    } catch(e) {
+      reportarError('Restaurar respaldo en la nube', e, { lotes: `${lotesOk}/${totalLotes}` });
+      toast(`❌ La restauración NO se completó: ${e.message}` + (totalLotes ? ` (lotes confirmados: ${lotesOk} de ${totalLotes})` : ''), 'err');
+      return false;
+    }
+  }
+  if (omitidos) toast(`${validos.length} acreditados restaurados · ${omitidos} omitidos por datos inválidos`, 'wrn');
+  else toast(`${validos.length} acreditados restaurados ✅`, 'ok');
+  return true;
 }
 
