@@ -10,14 +10,63 @@
 <meta name="apple-mobile-web-app-title" content="HD Crédit">
 <link rel="apple-touch-icon" href="icon-192.png">
 <script>
+  // Versión de esta página. js/app.js debe declarar la misma: si no coincide,
+  // o un script no carga, se avisa en vez de dejar el login en "Cargando…".
+  window.HD_VERSION = '20261105';
+  (function () {
+    const OPCIONALES = /\/js\/(config-real|firebase-prueba\.local)\.js/;
+    let scriptFallido = false;
+    document.addEventListener('error', e => {
+      const t = e.target;
+      if (t && t.tagName === 'SCRIPT' && /\/js\//.test(t.src) && !OPCIONALES.test(t.src)) scriptFallido = true;
+    }, true);
+    function avisarFalloCarga(msg) {
+      const $ = id => document.getElementById(id);
+      if ($('loader')) $('loader').style.display = 'none';
+      if ($('login-scr')) $('login-scr').classList.add('on');
+      if ($('login-form')) $('login-form').hidden = true;
+      if ($('login-msg')) { $('login-msg').textContent = msg; $('login-msg').hidden = false; $('login-msg').dataset.tipo = 'err'; }
+      if ($('login-reintentar')) { $('login-reintentar').hidden = false; $('login-reintentar').onclick = window.hdRepararCarga; }
+    }
+    // Quita solo la copia de la app: los datos del teléfono no están ahí.
+    window.hdRepararCarga = async () => {
+      if (navigator.onLine && window.caches) {
+        try { await Promise.all((await caches.keys()).map(k => caches.delete(k))); } catch(e) {}
+      }
+      location.reload();
+    };
+    window.addEventListener('load', () => {
+      if (scriptFallido || window.HD_APP_VERSION !== window.HD_VERSION) {
+        avisarFalloCarga('La app no terminó de actualizarse. Lo guardado en este teléfono se conserva. Conéctate a internet y toca Reintentar.');
+        return;
+      }
+      setTimeout(() => {
+        const scr = document.getElementById('login-scr'), btn = document.getElementById('login-btn'), msg = document.getElementById('login-msg');
+        if (scr && scr.classList.contains('on') && btn && btn.disabled && msg && msg.textContent.trim() === 'Cargando…') {
+          avisarFalloCarga('La app está tardando demasiado en cargar. Lo guardado en este teléfono se conserva. Revisa tu conexión y toca Reintentar.');
+        }
+      }, 30000);
+    });
+  })();
+
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', async () => {
-      const reg = await navigator.serviceWorker.register('sw.js');
-      // Si hay nueva versión esperando, activarla inmediatamente
+      const yaTeniaVersion = !!navigator.serviceWorker.controller; // primera instalación: no hace falta recargar
+      let reg;
+      try { reg = await navigator.serviceWorker.register('sw.js'); }
+      catch(e) { if (typeof reportarError === 'function') reportarError('Registrar service worker', e); return; }
+      if (!reg) return; // navegador/entorno que bloquea service workers
+      // Recarga para usar la versión nueva, sin cortar a quien está escribiendo
+      // o tiene una ventana abierta (por ejemplo, un cobro o el rescate).
+      const ocupado = () => /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || '') || !!document.querySelector('.overlay.open');
+      const recargarAlTerminar = () => {
+        if (!ocupado()) { location.reload(); return; }
+        setTimeout(recargarAlTerminar, 5000);
+      };
       reg.addEventListener('updatefound', () => {
         const newSW = reg.installing;
         newSW.addEventListener('statechange', () => {
-          if (newSW.state === 'activated') location.reload();
+          if (newSW.state === 'activated' && yaTeniaVersion) recargarAlTerminar();
         });
       });
     });
@@ -131,8 +180,11 @@ select.fc option{background:var(--surface)}
 @keyframes fu{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
 
 /* STAT CARDS */
-.sg{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:24px}
-.sc{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;position:relative;overflow:hidden;transition:transform var(--trans),border-color var(--trans)}
+.dsec{font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;font-weight:700;margin:0 2px 10px}
+.dgroup{margin-bottom:24px}
+.shortcuts{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:22px}
+.sg{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}
+.sc{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px;position:relative;overflow:hidden;min-width:0;transition:transform var(--trans),border-color var(--trans)}
 .sc:hover{transform:translateY(-2px);border-color:var(--border2)}
 .sc::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--accent)}
 .sc.w::before{background:var(--warn)}
@@ -144,7 +196,7 @@ select.fc option{background:var(--surface)}
 .sc.d .si{background:rgba(255,69,96,.1);color:var(--danger)}
 .sc.i .si{background:rgba(59,130,246,.1);color:var(--info)}
 .sc.p .si{background:rgba(139,92,246,.1);color:var(--purple)}
-.sv{font-family:'Syne',sans-serif;font-size:1.9rem;font-weight:800;line-height:1}
+.sv{font-family:'Syne',sans-serif;font-size:clamp(1.2rem,4.5vw,1.9rem);font-weight:800;line-height:1.1;overflow-wrap:anywhere}
 .sl{font-size:.76rem;color:var(--muted);margin-top:4px}
 
 /* TABLE */
@@ -228,6 +280,16 @@ tbody tr:last-child td{border-bottom:none}
 .ec-q.pd{background:var(--border);color:var(--muted)}
 .ec-q.nx{background:rgba(255,184,0,.2);border:1px solid var(--warn);color:var(--warn)}
 
+/* LOGIN — tapa toda la app hasta tener sesión (visible por defecto) */
+#login-scr{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:8000;padding:20px}
+#login-scr.on{display:flex}
+#login-scr .cfg-box{max-width:400px}
+.login-prueba{background:var(--warn);color:#000;font-weight:800;font-size:.78rem;padding:6px 10px;border-radius:var(--radius);margin-bottom:14px;text-align:center}
+#login-msg{font-size:.82rem;margin-top:10px;color:var(--danger);white-space:pre-line}
+#login-msg[data-tipo="info"]{color:var(--muted)}
+#login-reintentar[hidden]{display:none}
+body.sin-sesion #sidebar,body.sin-sesion #ham,body.sin-sesion #err-badge,body.sin-sesion #rev-badge,body.sin-sesion #banner-sinsync{visibility:hidden}
+
 /* FIREBASE CONFIG */
 #fb-cfg{position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:6000;padding:20px}
 .cfg-box{background:var(--card);border:1px solid var(--border2);border-radius:var(--radius-lg);padding:36px;width:100%;max-width:540px}
@@ -244,6 +306,17 @@ tbody tr:last-child td{border-bottom:none}
 @keyframes blink{to{transform:scale(1.15);box-shadow:0 0 10px rgba(255,184,0,.4)}}
 
 /* UNDO BAR */
+.err-badge{position:fixed;right:max(16px,env(safe-area-inset-right,0px));bottom:calc(16px + env(safe-area-inset-bottom,0px));z-index:6500;display:flex;align-items:center;gap:6px;background:var(--danger);color:#fff;border:0;border-radius:999px;padding:9px 14px;font-size:.8rem;font-weight:700;box-shadow:var(--shadow);cursor:pointer}
+.err-badge[hidden]{display:none}
+.rev-badge{background:var(--warn);color:#111;bottom:calc(64px + env(safe-area-inset-bottom,0px))}
+.banner-sinsync{position:fixed;left:0;right:0;top:0;z-index:6400;display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap;background:var(--danger);color:#fff;font-size:.8rem;font-weight:700;padding:calc(6px + env(safe-area-inset-top,0px)) 16px 6px}
+.banner-sinsync[hidden]{display:none}
+.rsc-sec{border:1px solid var(--border2);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
+.rsc-sec h4{font-size:.82rem;margin-bottom:4px}
+.rsc-sec ul{margin:4px 0 0 18px;color:var(--muted);font-size:.78rem}
+.err-item{border:1px solid var(--border2);border-left:3px solid var(--danger);border-radius:var(--radius);padding:10px 12px;margin-bottom:8px}
+.err-meta{font-size:.72rem;color:var(--muted);font-family:'DM Mono',monospace}
+.err-msg{font-size:.84rem;margin-top:3px;overflow-wrap:anywhere}
 #undo-bar{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid rgba(255,184,0,.3);border-radius:var(--radius);padding:10px 14px;margin:0 18px 10px;font-size:.84rem;position:relative;overflow:hidden}
 #undo-bar .undo-msg{flex:1;font-size:.83rem}
 .undo-btn{background:rgba(255,184,0,.12);color:var(--warn);border:1px solid rgba(255,184,0,.3);padding:6px 13px;border-radius:8px;font-size:.78rem;font-weight:700;cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:6px;font-family:inherit}
@@ -287,7 +360,29 @@ tbody tr:last-child td{border-bottom:none}
 }
 </style>
 </head>
-<body>
+<body class="sin-sesion">
+
+<!-- LOGIN: correo y contraseña. Visible desde el inicio; nada de la app
+     (ni datos) se muestra hasta iniciar sesión. Ver js/sesion.js -->
+<div id="login-scr" class="on" role="dialog" aria-modal="true" aria-label="Iniciar sesión">
+  <div class="cfg-box">
+    <div class="cfg-logo">HD Crédit</div>
+    <div id="login-prueba" class="login-prueba" hidden>🧪 MODO PRUEBA</div>
+    <form id="login-form" onsubmit="iniciarSesion(event)" autocomplete="on">
+      <div class="fg">
+        <label for="login-email">Correo</label>
+        <input class="fc" id="login-email" type="email" autocomplete="username" inputmode="email" required disabled>
+      </div>
+      <div class="fg">
+        <label for="login-pass">Contraseña</label>
+        <input class="fc" id="login-pass" type="password" autocomplete="current-password" required disabled>
+      </div>
+      <button class="btn btn-p" id="login-btn" type="submit" disabled><i class="fas fa-sign-in-alt"></i> Entrar</button>
+    </form>
+    <p id="login-msg" data-tipo="info">Cargando…</p>
+    <button class="btn btn-s" id="login-reintentar" type="button" onclick="location.reload()" hidden style="margin-top:10px"><i class="fas fa-sync"></i> Reintentar</button>
+  </div>
+</div>
 
 <!-- LOADER -->
 <div id="loader">
@@ -299,6 +394,43 @@ tbody tr:last-child td{border-bottom:none}
 <!-- TOASTS -->
 <div id="toasts"></div>
 
+<!-- Aviso fijo: trabajando sin sincronizar (modo local por fallo o rescate pendiente) -->
+<div id="banner-sinsync" class="banner-sinsync" hidden role="status">
+  <span id="banner-sinsync-txt">⚠️ SIN SINCRONIZAR</span>
+  <button class="btn btn-s btn-sm" id="banner-reintentar" onclick="reintentarConexion()"><i class="fas fa-sync"></i> Reintentar</button>
+</div>
+
+<!-- RESCATE: datos que solo existen en este teléfono -->
+<div class="overlay" id="m-rescate" data-bloqueante role="dialog" aria-modal="true" aria-label="Rescate de datos locales">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-life-ring" style="color:var(--warn);margin-right:8px"></i>Datos guardados solo en este teléfono</div></div>
+    <div id="resc-paso1">
+      <p id="resc-resumen" style="font-size:.86rem;margin-bottom:14px;white-space:pre-line"></p>
+      <button class="btn btn-p" id="resc-descargar" onclick="rescateDescargar()"><i class="fas fa-download"></i> 1. Descargar respaldo JSON</button>
+      <label style="display:flex;gap:8px;align-items:center;margin:14px 0;font-size:.85rem"><input type="checkbox" id="resc-check"> 2. Ya guardé el archivo de respaldo</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-p" id="resc-comparar" onclick="rescateComparar()" disabled><i class="fas fa-cloud"></i> 3. Conectar y comparar con la nube</button>
+        <button class="btn btn-s" id="resc-local" onclick="rescateSeguirLocal()"><i class="fas fa-mobile-alt"></i> Seguir sin conectar</button>
+      </div>
+    </div>
+    <div id="resc-paso2" hidden>
+      <div id="resc-comparacion" style="font-size:.84rem"></div>
+      <p id="resc-error" style="color:var(--danger);font-size:.82rem;margin-top:8px" hidden></p>
+      <label style="display:flex;gap:8px;align-items:center;margin:14px 0;font-size:.85rem"><input type="checkbox" id="resc-check2"> Revisé la comparación</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-p" id="resc-subir" onclick="rescateSubir()" disabled><i class="fas fa-cloud-upload-alt"></i> Subir faltantes a la nube</button>
+        <button class="btn btn-s" id="resc-sinsubir" onclick="rescateTerminar()" disabled>Conectar sin subir nada</button>
+        <button class="btn btn-s" id="resc-local2" onclick="rescateSeguirLocal()"><i class="fas fa-mobile-alt"></i> Seguir sin conectar</button>
+      </div>
+    </div>
+    <div id="resc-paso3" hidden>
+      <div id="resc-resultado" style="font-size:.86rem;white-space:pre-line;margin-bottom:14px"></div>
+      <button class="btn btn-p" id="resc-terminar" onclick="rescateTerminar()"><i class="fas fa-check"></i> Terminar y sincronizar</button>
+    </div>
+    <p style="font-size:.72rem;color:var(--muted);margin-top:14px">La copia de rescate se queda guardada en este teléfono; nada se borra automáticamente.</p>
+  </div>
+</div>
+
 <!-- FIREBASE CONFIG -->
 <div id="fb-cfg" style="display:none">
   <div class="cfg-box">
@@ -308,10 +440,10 @@ tbody tr:last-child td{border-bottom:none}
     <div class="cfg-steps">
       <div class="cstep"><div class="csn">1</div><div>Ve a <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a> y crea un proyecto (sin Google Analytics).</div></div>
       <div class="cstep"><div class="csn">2</div><div>En el proyecto → <strong>Firestore Database</strong> → Crear base de datos → Modo producción.</div></div>
-      <div class="cstep"><div class="csn">3</div><div><strong>Authentication</strong> → pestaña Sign-in method → habilita el proveedor <strong>Google</strong>.</div></div>
-      <div class="cstep"><div class="csn">4</div><div>Firestore → pestaña <strong>Reglas</strong> → reemplaza todo con:<br><code style="color:var(--accent);font-size:.75rem">rules_version='2'; service cloud.firestore { match /databases/{database}/documents { match /usuarios/{uid}/{document=**} { allow read, write: if request.auth != null && request.auth.uid == uid; } } }</code><br><span style="color:var(--muted);font-size:.73rem">Cada acreditado y cada movimiento quedan protegidos por tu cuenta de Google — nadie más puede leerlos ni escribirlos.</span></div></div>
+      <div class="cstep"><div class="csn">3</div><div><strong>Authentication</strong> → <strong>Sign-in method</strong> → habilita <strong>Correo electrónico/contraseña</strong> (no habilites Anónimo). En <strong>Users</strong> crea cada usuario y copia su UID.</div></div>
+      <div class="cstep"><div class="csn">4</div><div>Firestore → <strong>Reglas</strong>: usa el archivo <code style="color:var(--accent)">firestore.rules</code> del proyecto con los UID autorizados.<br><span style="color:var(--muted);font-size:.73rem">Solo esos usuarios (con correo y contraseña) pueden leer/escribir; los anónimos se rechazan.</span></div></div>
       <div class="cstep"><div class="csn">5</div><div>Configuración del proyecto ⚙️ → <strong>Agregar app</strong> → Web (&lt;/&gt;) → copia el objeto <code style="color:var(--accent)">firebaseConfig</code>.</div></div>
-      <div class="cstep"><div class="csn">6</div><div>Pega el JSON abajo, toca <strong>Conectar Firebase</strong> e inicia sesión con Google.</div></div>
+      <div class="cstep"><div class="csn">6</div><div>Pega el JSON abajo y toca <strong>Conectar Firebase</strong>.</div></div>
     </div>
     <div class="fg">
       <label>firebaseConfig JSON</label>
@@ -319,22 +451,8 @@ tbody tr:last-child td{border-bottom:none}
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
       <button class="btn btn-p" onclick="connectFirebase()"><i class="fas fa-fire"></i> Conectar Firebase</button>
-      <button class="btn btn-s" onclick="goLocal()"><i class="fas fa-laptop"></i> Solo local (este dispositivo)</button>
+      <button class="btn btn-s" onclick="document.getElementById('fb-cfg').style.display='none'">Cerrar</button>
     </div>
-    <p style="font-size:.73rem;color:var(--muted);margin-top:10px">Modo local: datos guardados en este navegador. No se sincronizan entre dispositivos.</p>
-  </div>
-</div>
-
-<!-- FIREBASE LOGIN -->
-<div id="fb-login" style="position:fixed;inset:0;background:var(--bg);display:none;align-items:center;justify-content:center;z-index:6000;padding:20px">
-  <div class="cfg-box" style="text-align:center">
-    <div class="cfg-logo">HD Crédit</div>
-    <div style="font-family:'DM Mono',monospace;font-size:.7rem;color:var(--muted);margin-bottom:12px">INICIAR SESIÓN</div>
-    <p class="cfg-desc">Tus acreditados están protegidos por cuenta. Inicia sesión con Google para ver y sincronizar tu cartera.</p>
-    <button class="btn btn-p" style="width:100%;justify-content:center" onclick="loginGoogle()"><i class="fab fa-google"></i> Iniciar sesión con Google</button>
-    <p style="font-size:.73rem;color:var(--muted);margin-top:14px">¿Ya usabas HD Crédit antes de este cambio? Después de iniciar sesión aquí, abre <code style="color:var(--accent)">migrar.html</code> una sola vez para copiar tus datos anteriores a tu cuenta.</p>
-    <button class="btn btn-s" style="width:100%;justify-content:center;margin-top:14px" onclick="goLocal()"><i class="fas fa-laptop"></i> Usar datos guardados en este dispositivo</button>
-    <p style="font-size:.71rem;color:var(--muted);margin-top:8px">Úsalo solo si el login no funciona por ahora: abre la última copia guardada en este dispositivo (sin sincronizar) para que puedas seguir cobrando mientras se resuelve.</p>
   </div>
 </div>
 
@@ -360,13 +478,14 @@ tbody tr:last-child td{border-bottom:none}
     <div class="ni" onclick="gv('reportes')"><i class="fas fa-chart-bar"></i> Reportes</div>
     <div class="ni" onclick="doExport()"><i class="fas fa-file-csv"></i> Exportar CSV</div>
     <div class="ni" onclick="doExportXLSX()"><i class="fas fa-file-excel" style="color:#1d6f42"></i> Exportar Excel</div>
+    <div class="ni" onclick="descargarReporteCartera()"><i class="fas fa-file-invoice-dollar" style="color:#1d6f42"></i> Reporte de Cartera (Excel)</div>
     <div class="ni" onclick="doExportJSON()"><i class="fas fa-download"></i> Respaldo JSON</div>
     <div class="ni" onclick="doImportJSON()"><i class="fas fa-upload"></i> Restaurar JSON</div>
     <div class="ni" onclick="gv('dashboard')"><i class="fas fa-chart-pie"></i> Panel Principal</div>
     <div class="sb-sec">Cobranza</div>
     <div class="ni" onclick="gv('morosos')"><i class="fas fa-exclamation-circle"></i> Morosos y Recargos <span class="nb" id="nb-mor" style="display:none">0</span></div>
     <div class="sb-sec">Config</div>
-    <div class="ni" onclick="document.getElementById('fb-cfg').style.display='flex'"><i class="fas fa-fire"></i> Firebase</div>
+    <div class="ni" id="ni-salir" style="display:none" onclick="cerrarSesion()"><i class="fas fa-sign-out-alt"></i> Cerrar sesión</div>
   </div>
   <div class="sb-foot">
     <div class="av" id="sb-avatar">H</div>
@@ -374,9 +493,12 @@ tbody tr:last-child td{border-bottom:none}
       <div class="ui-name" id="ui-name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">HD Crédit</div>
       <div class="ui-role" id="sync-lbl">● Local</div>
     </div>
-    <button class="btn-x" id="btn-logout" onclick="logoutFB()" title="Cerrar sesión" style="display:none;flex-shrink:0"><i class="fas fa-sign-out-alt"></i></button>
   </div>
 </nav>
+<!-- Aviso fijo de cobros por revisar (rechazados por la nube o posible cobro doble) -->
+<button id="rev-badge" class="err-badge rev-badge" onclick="abrirRevision()" hidden title="Cobros por revisar"><i class="fas fa-exclamation-triangle"></i> <span id="rev-count">0</span> cobros por revisar</button>
+<!-- Aviso fijo de errores silenciosos (fuera del sidebar para que siempre se vea) -->
+<button id="err-badge" class="err-badge" onclick="abrirErrores()" hidden title="Ver errores registrados"><i class="fas fa-bug"></i> <span id="err-count">0</span> errores</button>
 
 <!-- MAIN -->
 <div id="main">
@@ -393,14 +515,32 @@ tbody tr:last-child td{border-bottom:none}
     </div>
   </div>
   <div class="ca">
-    <div class="sg">
-      <div class="sc"><div class="si"><i class="fas fa-users"></i></div><div class="sv" id="s-total">0</div><div class="sl">Acreditados</div></div>
-      <div class="sc w"><div class="si"><i class="fas fa-money-bill-wave"></i></div><div class="sv" id="s-capital">$0</div><div class="sl">Capital Prestado</div></div>
-      <div class="sc d"><div class="si"><i class="fas fa-exclamation-triangle"></i></div><div class="sv" id="s-morosos">0</div><div class="sl">Morosos</div></div>
-      <div class="sc i"><div class="si"><i class="fas fa-coins"></i></div><div class="sv" id="s-saldo">$0</div><div class="sl">Saldo Pendiente</div></div>
-      <div class="sc p"><div class="si"><i class="fas fa-calendar-check"></i></div><div class="sv" id="s-qcobro">$0</div><div class="sl">Cobro Esta Quincena</div></div>
-      <div class="sc"><div class="si"><i class="fas fa-check-circle"></i></div><div class="sv" id="s-cobrado">$0</div><div class="sl">Cobrado Quincena Actual</div></div>
+    <div class="shortcuts">
+      <button class="btn btn-s btn-sm" onclick="gv('checklist')"><i class="fas fa-check-square"></i> Control de Cobros</button>
+      <button class="btn btn-s btn-sm" onclick="gv('clientes')"><i class="fas fa-users"></i> Acreditados</button>
+      <button class="btn btn-s btn-sm" onclick="gv('morosos')"><i class="fas fa-exclamation-circle"></i> Morosos y Recargos</button>
+      <button class="btn btn-s btn-sm" onclick="descargarReporteCartera()"><i class="fas fa-file-excel" style="color:#1d6f42"></i> Reporte de Cartera</button>
     </div>
+
+    <div class="dgroup">
+      <div class="dsec">Cartera General</div>
+      <div class="sg">
+        <div class="sc"><div class="si"><i class="fas fa-users"></i></div><div class="sv" id="s-total">0</div><div class="sl">Acreditados</div></div>
+        <div class="sc p"><div class="si"><i class="fas fa-user-check"></i></div><div class="sv" id="s-activos">0</div><div class="sl">Acreditados Activos</div></div>
+        <div class="sc w"><div class="si"><i class="fas fa-money-bill-wave"></i></div><div class="sv" id="s-capital">$0</div><div class="sl">Capital Prestado</div></div>
+        <div class="sc i"><div class="si"><i class="fas fa-coins"></i></div><div class="sv" id="s-saldo">$0</div><div class="sl">Saldo Pendiente</div></div>
+      </div>
+    </div>
+
+    <div class="dgroup">
+      <div class="dsec">Esta Quincena y Alertas</div>
+      <div class="sg">
+        <div class="sc p"><div class="si"><i class="fas fa-calendar-check"></i></div><div class="sv" id="s-qcobro">$0</div><div class="sl">Cobro Esperado</div></div>
+        <div class="sc"><div class="si"><i class="fas fa-check-circle"></i></div><div class="sv" id="s-cobrado">$0</div><div class="sl">Cobrado hasta Ahora</div></div>
+        <div class="sc d"><div class="si"><i class="fas fa-exclamation-triangle"></i></div><div class="sv" id="s-morosos">0</div><div class="sl">Morosos</div></div>
+      </div>
+    </div>
+
     <div class="dg">
       <div class="dc">
         <div class="dct"><i class="fas fa-exclamation-circle"></i> Morosos</div>
@@ -431,6 +571,7 @@ tbody tr:last-child td{border-bottom:none}
     <div class="tw">
       <div class="ch-hd">
         <div class="qsel"><i class="fas fa-calendar" style="color:var(--accent)"></i><select id="qsel" onchange="renderCL()"></select></div>
+        <button class="btn btn-s btn-sm" onclick="descargarReporteCartera()" title="Descarga el reporte de cartera activa de esta quincena en Excel"><i class="fas fa-file-excel" style="color:#1d6f42"></i> Reporte</button>
         <span id="cl-prog" style="font-size:.82rem;color:var(--muted);margin-left:auto"></span>
       </div>
       <div style="padding:11px 18px;border-bottom:1px solid var(--border);background:var(--surface)">
@@ -489,6 +630,9 @@ tbody tr:last-child td{border-bottom:none}
       <div class="ts"><table><thead><tr>
         <th>Acreditado</th><th>Monto</th><th>Quincena</th><th>Fecha</th><th>Hora</th><th>Tipo</th>
       </tr></thead><tbody id="tb-h"></tbody></table></div>
+      <div id="h-mas" style="padding:14px 18px;text-align:center;border-top:1px solid var(--border);display:none">
+        <button class="btn btn-s btn-sm" id="h-mas-btn" onclick="cargarMasHistorial()"><i class="fas fa-history"></i> Cargar historial anterior</button>
+      </div>
     </div>
   </div>
 </div>
@@ -599,13 +743,13 @@ tbody tr:last-child td{border-bottom:none}
       </div>
       <div class="fg"><label id="lbl-pq">Pago Quincenal</label><input class="fc" id="f-pq" readonly placeholder="Calculado" style="color:var(--accent)"></div>
       <div class="fg"><label>Fecha Inicio</label><input class="fc" type="date" id="f-ini"></div>
-      <div class="fg" id="fg-pagadas"><label id="lbl-pag">Q ya Pagadas</label><input class="fc" type="number" id="f-pag" value="0" min="0"></div>
+      <div class="fg" id="fg-pagadas"><label id="lbl-pag">Q ya Pagadas</label><input class="fc" type="number" id="f-pag" value="0" min="0" step="1" inputmode="numeric"></div>
       <div class="fg full"><label>WhatsApp (10 dígitos)</label><input class="fc" id="f-tel" placeholder="5512345678"></div>
       <div class="fg full"><label>Notas</label><textarea class="fc" id="f-notas" rows="2" placeholder="Observaciones..."></textarea></div>
     </div>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px;flex-wrap:wrap">
       <button class="btn btn-s" onclick="cm('m-cliente')">Cancelar</button>
-      <button class="btn btn-p" onclick="saveC()"><i class="fas fa-save"></i> Guardar</button>
+      <button class="btn btn-p" id="btn-save-c" onclick="saveC()"><i class="fas fa-save"></i> Guardar</button>
     </div>
   </div>
 </div>
@@ -618,6 +762,45 @@ tbody tr:last-child td{border-bottom:none}
     <div style="display:flex;justify-content:flex-end;gap:8px">
       <button class="btn btn-s" onclick="cm('m-confirm')">Cancelar</button>
       <button class="btn btn-d" id="conf-ok"><i class="fas fa-trash"></i> Eliminar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirmar restauración de respaldo -->
+<div class="overlay" id="m-restaurar" role="dialog" aria-modal="true" aria-label="Confirmar restauración">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-upload" style="color:var(--warn);margin-right:8px"></i>Restaurar respaldo</div><button class="btn-x" onclick="cm('m-restaurar')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
+    <p style="font-size:.87rem;margin-bottom:20px;white-space:pre-line" id="rest-msg"></p>
+    <div style="display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-s" id="rest-cancel" onclick="cm('m-restaurar')">Cancelar</button>
+      <button class="btn btn-d" id="rest-ok"><i class="fas fa-upload"></i> Sí, restaurar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Cobros por revisar -->
+<div class="overlay" id="m-revq" role="dialog" aria-modal="true" aria-label="Cobros por revisar">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-exclamation-triangle" style="color:var(--warn);margin-right:8px"></i>Cobros por revisar</div><button class="btn-x" onclick="cm('m-revq')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
+    <p style="color:var(--muted);font-size:.8rem;margin-bottom:12px">Cobros hechos en este teléfono que no se subieron a la nube, o que la nube ya tenía (posible cobro doble). Revisa cada uno con el acreditado. También se incluyen en el respaldo JSON y en el Excel.</p>
+    <div id="revq-body"></div>
+    <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn btn-s" onclick="cm('m-revq')">Cerrar</button></div>
+  </div>
+</div>
+
+<!-- Errores registrados -->
+<div class="overlay" id="m-errores" role="dialog" aria-modal="true" aria-label="Errores registrados">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-hd"><div class="modal-title"><i class="fas fa-bug" style="color:var(--danger);margin-right:8px"></i>Errores registrados</div><button class="btn-x" onclick="cm('m-errores')" aria-label="Cerrar"><i class="fas fa-times"></i></button></div>
+    <p style="color:var(--muted);font-size:.8rem;margin-bottom:12px">Se guardan solo en este dispositivo (últimos 50). Toma captura si necesitas reportarlos.</p>
+    <div id="err-body"></div>
+    <div class="rsc-sec" style="margin-top:12px">
+      <p id="esp-info" style="font-size:.78rem;color:var(--muted)"></p>
+      <button class="btn btn-s btn-sm" id="esp-borrar" onclick="borrarCopiasDescargadas()" hidden style="margin-top:6px"></button>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px;flex-wrap:wrap">
+      <button class="btn btn-s" onclick="limpiarErrores()"><i class="fas fa-broom"></i> Limpiar</button>
+      <button class="btn btn-s" onclick="cm('m-errores')">Cerrar</button>
     </div>
   </div>
 </div>
@@ -667,1647 +850,18 @@ tbody tr:last-child td{border-bottom:none}
   </div>
 </div>
 
-<script>
-/* ============================================================
-   TABLA DE FACTORES
-============================================================ */
-const TF = {
-  1000:{6:240,8:194,10:167,12:null},
-  2000:{6:467,8:364,10:307,12:null},
-  3000:{6:650,8:545,10:456,12:400},
-  4000:{6:850,8:722,10:601,12:534},
-  5000:{6:1083,8:900,10:751,12:667},
-  6000:{6:1300,8:1077,10:900,12:800},
-  7000:{6:1514,8:1264,10:1050,12:934},
-  8000:{6:1734,8:1431,10:1200,12:1067},
-  9000:{6:1954,8:1598,10:1350,12:1200},
-  10000:{6:2176,8:1764,10:1501,12:1334},
-  11000:{6:2384,8:1931,10:1651,12:1467},
-  12000:{6:2600,8:2097,10:1800,12:1600},
-  13000:{6:2817,8:2264,10:1950,12:1734},
-  14000:{6:3034,8:2431,10:2100,12:1867},
-  15000:{6:3251,8:2601,10:2251,12:2001}
-};
-
-/* ============================================================
-   TABLA DE FACTORES — PRÉSTAMO 30 DÍAS (pago único, +15%)
-============================================================ */
-const TF30 = {
-  1000:1150, 2000:2300, 3000:3450, 4000:4600, 5000:5750,
-  6000:6900, 7000:8050, 8000:9200, 9000:10350, 10000:11500
-};
-const RECARGO_DIA = { quincenal_fijo: 50, unico_30d: 100 };
-
-/* ============================================================
-   STATE
-============================================================ */
-let DB = null, AUTH = null, USE_FB = false, CURRENT_UID = null;
-let clientes = [], historial = [];
-let _pendingPago = {}, _pendingOrigHtml = {}, _lastPago = null, _undoing = false;
-let _unsubClientes = null, _unsubHistorial = null, _authUnsub = null;
-
-/* ============================================================
-   FIREBASE (lazy load)
-============================================================ */
-function connectFirebase() {
-  const raw = document.getElementById('fb-input').value.trim();
-  let cfg;
-  try {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) { toast('No se encontró configuración válida', 'err'); return; }
-    let json = match[0];
-    // Unquoted keys: apiKey: => "apiKey":
-    json = json.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
-    // Curly/smart quotes => straight quotes
-    json = json.replace(/[“”„‟‘’]/g, '"');
-    // Trailing commas
-    json = json.replace(/,\s*}/g, '}');
-    cfg = JSON.parse(json);
-    if (!cfg.apiKey || !cfg.projectId) { toast('Falta apiKey o projectId', 'err'); return; }
-  } catch(e) {
-    toast('Error: ' + e.message, 'err'); return;
-  }
-  localStorage.setItem('hd_fb', JSON.stringify(cfg));
-  loadFirebaseSDK(cfg);
-}
-
-function loadFirebaseSDK(cfg) {
-  // No reinyectar los <script> del SDK si ya están cargados (evita duplicados
-  // al reconectar Firebase más de una vez en la misma sesión)
-  if (window.firebase && typeof firebase.auth === 'function') { initFB(cfg); return; }
-  const srcs = [
-    'https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js',
-    'https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js',
-    'https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js'
-  ];
-  let i = 0;
-  function loadNext() {
-    if (i >= srcs.length) { initFB(cfg); return; }
-    const src = srcs[i++];
-    if (document.querySelector(`script[src="${src}"]`)) { loadNext(); return; }
-    const s = document.createElement('script');
-    s.src = src;
-    s.onerror = () => { toast('No se pudo cargar Firebase SDK. Usando modo local.', 'err'); goLocal(); };
-    s.onload = loadNext;
-    document.head.appendChild(s);
-  }
-  loadNext();
-}
-
-function initFB(cfg) {
-  try {
-    if (!firebase.apps.length) firebase.initializeApp(cfg);
-    DB = firebase.firestore();
-    AUTH = firebase.auth();
-    USE_FB = true;
-    document.getElementById('fb-cfg').style.display = 'none';
-    // Recoge el resultado si venimos de vuelta de signInWithRedirect
-    AUTH.getRedirectResult().catch(e => {
-      console.error('HD Crédit — error de inicio de sesión (redirect):', e);
-      toast('No se pudo iniciar sesión: ' + e.message, 'err');
-    });
-    if (_authUnsub) _authUnsub();
-    _authUnsub = AUTH.onAuthStateChanged(user => {
-      if (user) {
-        CURRENT_UID = user.uid;
-        document.getElementById('fb-login').style.display = 'none';
-        document.getElementById('sync-lbl').textContent = '🟢 ' + (user.displayName || user.email || 'Sesión activa');
-        document.getElementById('sync-lbl').style.color = 'var(--accent)';
-        document.getElementById('sb-avatar').textContent = ((user.displayName || user.email || 'H')[0] || 'H').toUpperCase();
-        document.getElementById('ui-name').textContent = user.displayName || user.email || 'HD Crédit';
-        document.getElementById('btn-logout').style.display = 'flex';
-        toast('Firebase conectado ✅', 'ok');
-        startFBSync();
-      } else {
-        CURRENT_UID = null;
-        if (_unsubClientes) { _unsubClientes(); _unsubClientes = null; }
-        if (_unsubHistorial) { _unsubHistorial(); _unsubHistorial = null; }
-        document.getElementById('btn-logout').style.display = 'none';
-        document.getElementById('sync-lbl').textContent = '○ Sin sesión';
-        document.getElementById('sync-lbl').style.color = 'var(--muted)';
-        document.getElementById('fb-login').style.display = 'flex';
-      }
-    });
-  } catch(e) {
-    console.error(e);
-    toast('Error Firebase: ' + e.message, 'err');
-    goLocal();
-  }
-}
-
-function loginGoogle() {
-  if (!AUTH) return;
-  const provider = new firebase.auth.GoogleAuthProvider();
-  // signInWithRedirect en vez de signInWithPopup: las apps instaladas
-  // (modo standalone/PWA) suelen bloquear o romper el flujo de popup
-  AUTH.signInWithRedirect(provider).catch(e => toast('No se pudo iniciar sesión: ' + e.message, 'err'));
-}
-
-function logoutFB() {
-  if (!AUTH) return;
-  AUTH.signOut();
-}
-
-// Colecciones con alcance por usuario autenticado — reemplaza las rutas
-// planas /clientes y /historial (abiertas a cualquiera) usadas antes de Auth
-function CLI() { return DB.collection('usuarios').doc(CURRENT_UID).collection('clientes'); }
-function HIST() { return DB.collection('usuarios').doc(CURRENT_UID).collection('historial'); }
-
-function startFBSync() {
-  // Cancelar listeners anteriores para evitar duplicados si se reconecta
-  if (_unsubClientes) { _unsubClientes(); _unsubClientes = null; }
-  if (_unsubHistorial) { _unsubHistorial(); _unsubHistorial = null; }
-  _unsubClientes = CLI().orderBy('createdAt').onSnapshot(snap => {
-    // Se confía siempre en el snapshot (incluye listas vacías reales, p.ej.
-    // al eliminar el último acreditado) — antes se descartaba ese caso y la
-    // pantalla quedaba con datos obsoletos
-    clientes = snap.docs.map(d => ({id: d.id, ...d.data()}));
-    syncAlertas();
-    localStorage.setItem('hd_c', JSON.stringify(clientes));
-    refresh();
-  }, err => {
-    console.error('HD Crédit — error de sincronización (clientes):', err);
-    toast('Error de sincronización: ' + err.message, 'err');
-  });
-  _unsubHistorial = HIST().orderBy('ts', 'desc').limit(500).onSnapshot(snap => {
-    historial = snap.docs.map(d => ({id: d.id, ...d.data()}));
-    localStorage.setItem('hd_h', JSON.stringify(historial));
-    renderH();
-    renderCL();
-    renderDash();
-  }, err => {
-    console.error('HD Crédit — error de sincronización (historial):', err);
-    toast('Error de sincronización: ' + err.message, 'err');
-  });
-}
-
-function goLocal() {
-  localStorage.setItem('hd_fb', 'local');
-  document.getElementById('fb-cfg').style.display = 'none';
-  loadLocal();
-}
-
-
-/* ============================================================
-   LOCAL STORAGE
-============================================================ */
-function syncAlertas() {
-  let changed = false;
-  clientes = clientes.map(c => {
-    const alerta = calcAlerta(c);
-    if (alerta !== (c.alerta || '')) { changed = true; return {...c, alerta}; }
-    return c;
-  });
-  if (changed) saveLocal();
-}
-
-function loadLocal() {
-  try { clientes = JSON.parse(localStorage.getItem('hd_c') || '[]'); }
-  catch(e) { clientes = []; toast('⚠️ Datos corruptos en almacenamiento local — se inició vacío. Restaura un respaldo JSON.', 'err'); }
-  try { historial = JSON.parse(localStorage.getItem('hd_h') || '[]'); }
-  catch(e) { historial = []; }
-  // Si no hay datos, intentar recuperar del respaldo automático antes de rendirnos
-  if (!clientes.length) {
-    for (const bkKey of ['hd_bk_0', 'hd_bk_1']) {
-      try {
-        const bk = JSON.parse(localStorage.getItem(bkKey) || 'null');
-        if (bk && Array.isArray(bk.clientes) && bk.clientes.length) {
-          clientes = bk.clientes;
-          toast('Datos recuperados del respaldo automático (' + new Date(bk.ts).toLocaleDateString() + ') ✅', 'ok');
-          break;
-        }
-      } catch(e) { /* respaldo corrupto, ignorar */ }
-    }
-  }
-  syncAlertas();
-  refresh();
-}
-
-function saveLocal() {
-  try {
-    localStorage.setItem('hd_c', JSON.stringify(clientes));
-    localStorage.setItem('hd_h', JSON.stringify(historial));
-  } catch(e) {
-    toast('⚠️ Almacenamiento lleno — exporta un respaldo JSON ahora para no perder datos', 'err');
-  }
-}
-
-/* ============================================================
-   SEED DATA (from your Excel file)
-============================================================ */
-function xlDate(n) {
-  if (!n) return '';
-  const d = new Date(Math.round((n - 25569) * 86400 * 1000));
-  return d.toISOString().split('T')[0];
-}
-
-function seedData() {
-  const raw = [
-    {n:'IVON',m:8000,pq:1067,nq:12,ini:45976,pg:12,s:0,a:''},
-    {n:'E.NANCY',m:5000,pq:667,nq:12,ini:45976,pg:12,s:0,a:''},
-    {n:'YISEL',m:8000,pq:1200,nq:10,ini:46021,pg:10,s:0,a:''},
-    {n:'TREJO',m:6000,pq:800,nq:12,ini:46006,pg:12,s:0,a:''},
-    {n:'GABI',m:4000,pq:604,nq:10,ini:45991,pg:10,s:0,a:''},
-    {n:'H/TERE',m:5000,pq:751,nq:10,ini:46006,pg:10,s:0,a:''},
-    {n:'JOSE LUIS',m:5000,pq:900,nq:8,ini:46127,pg:2,s:5400,a:'ATRASADO'},
-    {n:'ANDREA',m:4000,pq:601,nq:10,ini:46037,pg:10,s:0,a:''},
-    {n:'SAHIRA',m:5000,pq:667,nq:12,ini:46037,pg:8,s:2668,a:'ATRASADO'},
-    {n:'SAM',m:8000,pq:1067,nq:12,ini:46037,pg:8,s:4268,a:'ATRASADO'},
-    {n:'JASIEL',m:10000,pq:1501,nq:10,ini:46052,pg:8,s:3002,a:''},
-    {n:'PERLA 12Q',m:12000,pq:1600,nq:12,ini:46052,pg:10,s:3200,a:''},
-    {n:'JESUS 71',m:5000,pq:751,nq:10,ini:46052,pg:7,s:2253,a:''},
-    {n:'LORENA',m:15000,pq:2001,nq:12,ini:46052,pg:7,s:10005,a:''},
-    {n:'ERIKA',m:15000,pq:2001,nq:12,ini:46068,pg:6,s:12006,a:'ATRASADO'},
-    {n:'VERONICA',m:5000,pq:751,nq:10,ini:46068,pg:7,s:2253,a:''},
-    {n:'ESTELA',m:5000,pq:667,nq:12,ini:46068,pg:6,s:4002,a:'ATRASADO'},
-    {n:'MARI TERE',m:3000,pq:650,nq:6,ini:46068,pg:5,s:650,a:'ATRASADO'},
-    {n:'DIOSDADO',m:10000,pq:1334,nq:12,ini:46068,pg:6,s:8004,a:'ATRASADO'},
-    {n:'JULIA',m:5000,pq:667,nq:12,ini:46081,pg:5,s:4669,a:'ATRASADO'},
-    {n:'VIVIANA',m:5000,pq:667,nq:12,ini:46081,pg:5,s:4669,a:'ATRASADO'},
-    {n:'PAULINA',m:5000,pq:751,nq:10,ini:46081,pg:4,s:4506,a:'ATRASADO'},
-    {n:'OLGA',m:2000,pq:467,nq:6,ini:46081,pg:5,s:467,a:'ATRASADO'},
-    {n:'JOSE LUIS 2',m:5000,pq:900,nq:8,ini:46096,pg:4,s:3600,a:'ATRASADO'},
-    {n:'GISEL',m:5000,pq:1083,nq:6,ini:46111,pg:3,s:3249,a:'ATRASADO'},
-    {n:'VANE',m:7000,pq:1050,nq:10,ini:46111,pg:3,s:7350,a:'ATRASADO'},
-    {n:'PERLA 7K',m:7000,pq:934,nq:12,ini:46111,pg:4,s:7472,a:''},
-    {n:'ROXANA',m:6000,pq:800,nq:12,ini:46127,pg:2,s:8000,a:'ATRASADO'},
-    {n:'E.NANCY 2',m:4000,pq:722,nq:8,ini:46127,pg:2,s:4332,a:'ATRASADO'},
-    {n:'JAZ',m:4000,pq:534,nq:12,ini:46127,pg:2,s:5340,a:'ATRASADO'},
-    {n:'YISEL 2',m:8000,pq:1200,nq:10,ini:46142,pg:1,s:10800,a:'ATRASADO'},
-    {n:'TERE',m:7000,pq:1264,nq:8,ini:46142,pg:1,s:8848,a:'ATRASADO'},
-    {n:'ABRIL',m:5000,pq:900,nq:8,ini:46142,pg:1,s:6300,a:'ATRASADO'},
-    {n:'JOSE LUIS 3',m:4000,pq:722,nq:8,ini:46143,pg:1,s:5054,a:'ATRASADO'},
-    {n:'ANGEL C.',m:15000,pq:2601,nq:8,ini:46143,pg:1,s:18207,a:'ATRASADO'},
-    {n:'MARI TERE 2',m:5000,pq:1083,nq:6,ini:46157,pg:0,s:6498,a:'ATRASADO'},
-    {n:'DANIEL',m:6000,pq:800,nq:12,ini:46157,pg:0,s:9600,a:'ATRASADO'},
-    {n:'LUISA',m:6000,pq:1300,nq:6,ini:46157,pg:0,s:7800,a:'ATRASADO'},
-    {n:'TREJO 2',m:8000,pq:1067,nq:12,ini:46172,pg:0,s:12804,a:''},
-    {n:'MAMA DE SAM',m:8000,pq:1067,nq:12,ini:46172,pg:0,s:12804,a:''},
-    {n:'ANDREA 2',m:6000,pq:800,nq:12,ini:46172,pg:0,s:9600,a:''},
-    {n:'NAYE',m:6000,pq:800,nq:12,ini:46172,pg:0,s:9600,a:''},
-    {n:'JESY',m:4000,pq:722,nq:8,ini:0,pg:0,s:5776,a:''},
-    {n:'H/TERE 2',m:6000,pq:900,nq:10,ini:46172,pg:0,s:9000,a:''},
-  ];
-  clientes = raw.map((r, i) => ({
-    id: 'c_' + i + '_' + Date.now(),
-    nombre: r.n, monto: r.m, pq: r.pq, nq: r.nq,
-    inicio: xlDate(r.ini), pagadas: r.pg, saldo: r.s,
-    alerta: r.a, telefono: '', notas: '',
-    pagos: Array(r.nq).fill(false).map((_,j) => j < r.pg),
-    createdAt: new Date().toISOString()
-  }));
-  saveLocal();
-}
-
-/* ============================================================
-   QUINCENA UTILS
-============================================================ */
-function getQuincenas(n) {
-  const qs = [];
-  const now = new Date();
-  let y = now.getFullYear(), mo = now.getMonth();
-  let d = now.getDate() <= 15 ? 15 : new Date(y, mo+1, 0).getDate();
-  for (let i = 0; i < n; i++) {
-    qs.unshift({ label: fmtQ(y, mo, d), key: `${y}-${String(mo+1).padStart(2,'0')}-${String(d).padStart(2,'0')}` });
-    if (d === 15) { d = new Date(y, mo, 0).getDate(); mo--; if (mo<0){mo=11;y--;} }
-    else d = 15;
-  }
-  return qs;
-}
-function fmtQ(y, m, d) {
-  const M = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
-  return `${d===15?'1ª':'2ª'} Q · ${M[m]} ${y}`;
-}
-function curQKey() {
-  const n = new Date(), y = n.getFullYear(), mo = n.getMonth();
-  const d = n.getDate()<=15?15:new Date(y,mo+1,0).getDate();
-  return `${y}-${String(mo+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-}
-
-/* ============================================================
-   ATRASADO — cálculo real por fechas
-============================================================ */
-function nextQBoundary(d) {
-  return d.getDate() === 15
-    ? new Date(d.getFullYear(), d.getMonth() + 1, 0)
-    : new Date(d.getFullYear(), d.getMonth() + 1, 15);
-}
-function qsElapsed(inicio, producto = 'quincenal_fijo') {
-  if (!inicio) return 0;
-  const start = new Date(inicio + 'T12:00:00');
-  const now   = new Date();
-  if (start >= now) return 0;
-  if (producto === 'unico_30d') {
-    // Pago único: vence a los 30 días naturales del inicio, sin alinearse a quincenas
-    const due = new Date(start);
-    due.setDate(due.getDate() + 30);
-    return now >= due ? 1 : 0;
-  }
-  let d = new Date(start);
-  // Avanzar al cierre de la quincena de inicio
-  d.getDate() < 15
-    ? d.setDate(15)
-    : (d = new Date(d.getFullYear(), d.getMonth() + 1, 0));
-  // El primer pago vence en la quincena SIGUIENTE a la del inicio
-  // (el cliente tiene una quincena completa de gracia antes del primer cobro)
-  d = nextQBoundary(d);
-  let count = 0;
-  while (d < now && count < 36) {
-    count++;
-    d = nextQBoundary(d);
-  }
-  return count;
-}
-
-function calcAlerta(c) {
-  if (!c || !c.nq || c.saldo === 0 || (c.pagadas||0) >= c.nq) return '';
-  if (!c.inicio) return '';
-  const expected = Math.min(qsElapsed(c.inicio, c.producto), c.nq);
-  return (c.pagadas||0) < expected ? 'ATRASADO' : '';
-}
-
-/* ============================================================
-   RESPALDO AUTOMÁTICO (últimas 2 sesiones)
-============================================================ */
-function autoBackup() {
-  if (!clientes.length) return;
-  try {
-    localStorage.setItem('hd_bk_1', localStorage.getItem('hd_bk_0') || '');
-    localStorage.setItem('hd_bk_0', JSON.stringify({ clientes, ts: new Date().toISOString() }));
-  } catch(e) { /* cuota llena — ignorar */ }
-}
-
-/* ============================================================
-   CRUD
-============================================================ */
-function onProductoChange() {
-  const producto = document.getElementById('f-producto').value;
-  const montoSel = document.getElementById('f-monto');
-  const montoActual = montoSel.value;
-  const montos = producto === 'unico_30d'
-    ? [1000,2000,3000,4000,5000,6000,7000,8000,9000,10000]
-    : [1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,11000,12000,13000,14000,15000];
-  montoSel.innerHTML = '<option value="">Seleccionar...</option>'
-    + montos.map(m => `<option>${m}</option>`).join('');
-  if (montos.includes(parseInt(montoActual))) montoSel.value = montoActual;
-
-  document.getElementById('fg-plazo').style.display = producto === 'unico_30d' ? 'none' : '';
-  document.getElementById('lbl-pq').textContent = producto === 'unico_30d' ? 'Total a Pagar (30 días)' : 'Pago Quincenal';
-  document.getElementById('lbl-pag').textContent = producto === 'unico_30d' ? '¿Ya pagado? (0 o 1)' : 'Q ya Pagadas';
-  calcPQ();
-}
-
-function openNew() {
-  document.getElementById('eid').value = '';
-  document.getElementById('m-title').textContent = 'Nuevo Acreditado';
-  ['f-nom','f-tel','f-notas'].forEach(id => document.getElementById(id).value = '');
-  document.getElementById('f-producto').value = 'quincenal_fijo';
-  document.getElementById('f-monto').value = '';
-  document.getElementById('f-plazo').value = '';
-  document.getElementById('f-pq').value = '';
-  document.getElementById('f-ini').value = new Date().toISOString().split('T')[0];
-  document.getElementById('f-pag').value = '0';
-  onProductoChange();
-  om('m-cliente');
-}
-
-function editC(id) {
-  const c = clientes.find(x=>x.id===id); if(!c) return;
-  document.getElementById('eid').value = id;
-  document.getElementById('m-title').textContent = 'Editar Acreditado';
-  document.getElementById('f-nom').value = c.nombre;
-  document.getElementById('f-producto').value = c.producto || 'quincenal_fijo';
-  onProductoChange();
-  document.getElementById('f-monto').value = c.monto;
-  document.getElementById('f-plazo').value = c.nq;
-  document.getElementById('f-pq').value = '$' + (c.pq||0).toLocaleString('es-MX');
-  document.getElementById('f-ini').value = c.inicio||'';
-  document.getElementById('f-pag').value = c.pagadas||0;
-  document.getElementById('f-tel').value = c.telefono||'';
-  document.getElementById('f-notas').value = c.notas||'';
-  om('m-cliente');
-}
-
-function calcPQ() {
-  const producto = document.getElementById('f-producto').value;
-  const m = parseInt(document.getElementById('f-monto').value)||0;
-  const pq = document.getElementById('f-pq');
-  if (producto === 'unico_30d') {
-    if (!m) { pq.value = ''; return; }
-    if (!TF30[m]) { pq.value = 'Monto no válido'; return; }
-    pq.value = '$' + TF30[m].toLocaleString('es-MX');
-    return;
-  }
-  const p = parseInt(document.getElementById('f-plazo').value)||0;
-  if (m && p) {
-    if (!TF[m]) { pq.value = 'Monto no válido'; return; }
-    if (!TF[m][p]) { pq.value = 'No aplica'; return; }
-    pq.value = '$' + TF[m][p].toLocaleString('es-MX');
-  } else pq.value = '';
-}
-
-async function saveC() {
-  const nombre = document.getElementById('f-nom').value.trim();
-  const producto = document.getElementById('f-producto').value || 'quincenal_fijo';
-  const monto = parseInt(document.getElementById('f-monto').value)||0;
-  const nq = producto === 'unico_30d' ? 1 : (parseInt(document.getElementById('f-plazo').value)||0);
-  const inicio = document.getElementById('f-ini').value;
-  const pagadas = Math.min(parseInt(document.getElementById('f-pag').value)||0, nq);
-  const telefono = document.getElementById('f-tel').value.replace(/\D/g,'').slice(0,10);
-  const notas = document.getElementById('f-notas').value.trim();
-  const eid = document.getElementById('eid').value;
-
-  if (!nombre || !monto || !nq) { toast('Completa los campos requeridos', 'wrn'); return; }
-  let pq;
-  if (producto === 'unico_30d') {
-    if (!TF30[monto]) { toast('Monto no válido para Préstamo 30 Días', 'err'); return; }
-    pq = TF30[monto];
-  } else {
-    if (!TF[monto] || !TF[monto][nq]) { toast('Combinación monto/plazo no válida', 'err'); return; }
-    pq = TF[monto][nq];
-  }
-  if (!inicio && !eid) toast('⚠️ Sin fecha de inicio: no se podrán detectar atrasos automáticamente', 'wrn');
-
-  const saldo = Math.max(0, (nq - pagadas) * pq);
-  // Al editar: preservar el array pagos si el plazo y las quincenas pagadas no cambiaron
-  // (evita destruir el patrón de pagos individuales generado por reversiones)
-  let pagos;
-  if (eid) {
-    const existing = clientes.find(x=>x.id===eid);
-    if (existing && existing.nq === nq && existing.pagadas === pagadas && Array.isArray(existing.pagos)) {
-      pagos = existing.pagos.slice(0, nq);
-      while (pagos.length < nq) pagos.push(false);
-    } else {
-      pagos = Array(nq).fill(false).map((_,i) => i < pagadas);
-    }
-  } else {
-    pagos = Array(nq).fill(false).map((_,i) => i < pagadas);
-  }
-  const data = { nombre, producto, monto, pq, nq, inicio, pagadas, saldo, pagos, telefono, notas,
-    alerta: calcAlerta({saldo, pagadas, nq, inicio, producto}), updatedAt: new Date().toISOString() };
-
-  if (eid) {
-    if (USE_FB) {
-      try { await CLI().doc(eid).set(data, {merge:true}); }
-      catch(e) { toast('No se pudo guardar en la nube: ' + e.message, 'err'); return; }
-    } else { const i = clientes.findIndex(x=>x.id===eid); if(i>=0) clientes[i]={...clientes[i],...data}; saveLocal(); refresh(); }
-    toast(`${nombre} actualizado`, 'ok');
-  } else {
-    const id = 'c_' + Date.now();
-    data.id = id; data.createdAt = new Date().toISOString();
-    if (USE_FB) {
-      try { await CLI().doc(id).set(data); }
-      catch(e) { toast('No se pudo guardar en la nube: ' + e.message, 'err'); return; }
-    } else { clientes.push(data); saveLocal(); refresh(); }
-    toast(`${nombre} agregado ✅`, 'ok');
-  }
-  cm('m-cliente');
-}
-
-function confirmDel(id) {
-  const c = clientes.find(x=>x.id===id); if(!c) return;
-  document.getElementById('conf-msg').textContent = `¿Eliminar a ${c.nombre}? Esta acción no se puede deshacer.`;
-  document.getElementById('conf-ok').onclick = () => delC(id);
-  om('m-confirm');
-}
-
-async function delC(id) {
-  if (USE_FB) {
-    try {
-      await CLI().doc(id).delete();
-    } catch(e) {
-      toast('No se pudo eliminar en la nube: ' + e.message, 'err');
-      return;
-    }
-    // Limpiar historial huérfano en Firestore (best-effort: el cliente ya se eliminó)
-    try {
-      const snap = await HIST().where('clienteId', '==', id).get();
-      if (snap.docs.length) {
-        const batch = DB.batch();
-        snap.docs.forEach(doc => batch.delete(doc.ref));
-        await batch.commit();
-      }
-    } catch(e) {
-      console.error('HD Crédit — no se pudo limpiar historial huérfano:', e);
-      toast('⚠️ Cliente eliminado, pero no se pudo limpiar su historial — revisa Firestore', 'wrn');
-    }
-  } else {
-    clientes = clientes.filter(x=>x.id!==id);
-    historial = historial.filter(h=>h.clienteId!==id);
-    saveLocal(); refresh();
-  }
-  cm('m-confirm');
-  toast('Acreditado eliminado', 'wrn');
-}
-
-/* ============================================================
-   TOGGLE PAGO
-============================================================ */
-async function togglePago(cid, qIdx) {
-  const c = clientes.find(x=>x.id===cid); if(!c) return;
-  const pagos = [...(c.pagos||Array(c.nq||12).fill(false))];
-  pagos[qIdx] = !pagos[qIdx];
-  const pagadas = pagos.filter(Boolean).length;
-  const saldo = Math.max(0, (c.nq - pagadas) * c.pq);
-  const now = new Date();
-  const qKey = document.getElementById('qsel').value;
-
-  const log = {
-    id: 'h_' + Date.now(), clienteId: cid, nombre: c.nombre,
-    monto: c.pq, qIndex: qIdx, qKey,
-    accion: pagos[qIdx] ? 'PAGO' : 'REVERSO',
-    fecha: now.toLocaleDateString('es-MX'),
-    hora: now.toLocaleTimeString('es-MX'),
-    ts: now.toISOString()
-  };
-
-  const alerta = calcAlerta({...c, pagadas, saldo});
-  if (USE_FB) {
-    try {
-      await CLI().doc(cid).set({pagos, pagadas, saldo, alerta, updatedAt: now.toISOString()}, {merge:true});
-      await HIST().doc(log.id).set(log);
-    } catch(e) {
-      toast('❌ No se pudo registrar el cobro en la nube: ' + e.message, 'err');
-      return;
-    }
-  } else {
-    const i = clientes.findIndex(x=>x.id===cid);
-    clientes[i] = {...clientes[i], pagos, pagadas, saldo, alerta};
-    historial.unshift(log);
-    saveLocal();
-  }
-  toast(pagos[qIdx] ? `✅ Pago — ${c.nombre} $${c.pq.toLocaleString('es-MX')}` : `↩️ Revertido — ${c.nombre}`, pagos[qIdx]?'ok':'wrn');
-  if (!_undoing) { _lastPago = {cid, qIdx}; showUndo(c.nombre, pagos[qIdx]); }
-  renderCL();
-  renderDash();
-}
-
-/* ============================================================
-   RETROCEDER PAGO
-============================================================ */
-function openReverso(id) {
-  const c = clientes.find(x => x.id === id); if (!c) return;
-  const pagos = c.pagos || Array(c.nq).fill(false);
-  const pagadas = pagos.map((p, i) => p ? i : -1).filter(i => i >= 0);
-  if (!pagadas.length) { toast('Este acreditado no tiene pagos registrados', 'wrn'); return; }
-
-  const revOk = document.getElementById('rev-ok');
-  revOk.style.opacity = '.45';
-  revOk.style.pointerEvents = 'none';
-
-  document.getElementById('rev-body').innerHTML = `
-    <p style="color:var(--muted);font-size:.84rem;margin-bottom:14px">
-      Selecciona la quincena a revertir de <strong>${esc(c.nombre)}</strong>:
-    </p>
-    ${pagadas.map(i => {
-      const dueDate = getQDueDate(c.inicio, i, c.producto);
-      const dueLbl = dueDate
-        ? dueDate.toLocaleDateString('es-MX', {day:'2-digit', month:'short', year:'2-digit'})
-        : '—';
-      return `<div class="rev-item" onclick="selReverso('${c.id}',${i},this)">
-        <div>
-          <div style="font-weight:700;font-size:.87rem">Quincena ${i + 1}</div>
-          <div style="font-size:.73rem;color:var(--muted);font-family:'DM Mono',monospace">Vto. ${dueLbl}</div>
-        </div>
-        <span style="font-family:'DM Mono',monospace;color:var(--accent)">$${c.pq.toLocaleString('es-MX')}</span>
-        <i class="fas fa-chevron-right" style="color:var(--muted);font-size:.8rem"></i>
-      </div>`;
-    }).join('')}`;
-
-  om('m-reverso');
-}
-
-function selReverso(cid, qIdx, el) {
-  document.querySelectorAll('#m-reverso .rev-item').forEach(x => x.classList.remove('rev-sel'));
-  el.classList.add('rev-sel');
-  const revOk = document.getElementById('rev-ok');
-  revOk.style.opacity = '1';
-  revOk.style.pointerEvents = 'auto';
-  revOk.onclick = () => doReverso(cid, qIdx);
-}
-
-async function doReverso(cid, qIdx) {
-  cm('m-reverso');
-  const c = clientes.find(x => x.id === cid); if (!c) return;
-  const pagos = c.pagos || Array(c.nq).fill(false);
-  if (!pagos[qIdx]) { toast('Esa quincena ya no está pagada', 'wrn'); return; }
-  _undoing = true;
-  try { await togglePago(cid, qIdx); } finally { _undoing = false; }
-}
-
-/* ============================================================
-   REPORTE PERSONAL
-============================================================ */
-function openReporte(id) {
-  const c = clientes.find(x => x.id === id); if (!c) return;
-  const { rec, atrasadas, capitalAt, faltantes, saldo, totalCobrar, esAtrasado, esLiquidado } = resumenCliente(c);
-  const iniLabel = c.inicio
-    ? new Date(c.inicio + 'T12:00:00').toLocaleDateString('es-MX', {day:'2-digit', month:'long', year:'numeric'})
-    : '—';
-  const estado = esLiquidado ? '✅ Liquidado'
-    : esAtrasado ? '⚠️ Con atraso'
-    : '🟢 Al corriente';
-
-  const porDia = RECARGO_DIA[c.producto||'quincenal_fijo'] ?? 50;
-  const recHtml = rec.periodos.length ? `
-    <div class="ec-card" style="border-color:rgba(255,184,0,.25)">
-      <div class="ec-title" style="color:var(--warn)"><i class="fas fa-clock" style="margin-right:6px"></i>Recargos por Atraso ($${porDia}/día)</div>
-      ${rec.periodos.map(p => `
-        <div class="ec-row">
-          <span class="ec-lbl">Q${p.idx} — ${p.diasAtraso} días de atraso</span>
-          <span class="ec-val" style="color:var(--warn)">+$${p.recargo.toLocaleString('es-MX')}</span>
-        </div>`).join('')}
-      <div class="ec-row" style="padding-top:10px">
-        <span class="ec-lbl" style="font-weight:700">Total recargo</span>
-        <span class="ec-val" style="color:var(--warn)">+$${rec.total.toLocaleString('es-MX')}</span>
-      </div>
-    </div>
-    <div class="ec-card" style="border-color:rgba(0,229,160,.3);background:rgba(0,229,160,.04)">
-      <div class="ec-row">
-        <span class="ec-lbl">Capital atrasado</span>
-        <span class="ec-val" style="color:var(--danger)">$${capitalAt.toLocaleString('es-MX')}</span>
-      </div>
-      <div class="ec-row">
-        <span class="ec-lbl">Recargo acumulado</span>
-        <span class="ec-val" style="color:var(--warn)">+$${rec.total.toLocaleString('es-MX')}</span>
-      </div>
-      <div class="ec-row" style="padding-top:10px">
-        <span class="ec-lbl" style="font-weight:700;font-size:.9rem">TOTAL A LIQUIDAR</span>
-        <span class="ec-val" style="color:var(--accent);font-size:1.05rem;font-weight:800">$${totalCobrar.toLocaleString('es-MX')}</span>
-      </div>
-    </div>` : `
-    <div class="ec-card">
-      <div class="ec-row">
-        <span class="ec-lbl">Saldo pendiente</span>
-        <span class="ec-val" style="color:${saldo > 0 ? 'var(--warn)' : 'var(--accent)'}">$${saldo.toLocaleString('es-MX')}</span>
-      </div>
-    </div>`;
-
-  document.getElementById('rep-body').innerHTML = `
-    <div class="ec-card">
-      <div class="ec-title"><i class="fas fa-user" style="margin-right:6px"></i>Datos del Acreditado</div>
-      <div class="ec-row"><span class="ec-lbl">Nombre</span><span class="ec-val">${esc(c.nombre)}</span></div>
-      ${c.telefono ? `<div class="ec-row"><span class="ec-lbl">Teléfono</span><span class="ec-val" style="font-family:'DM Mono',monospace">${esc(c.telefono)}</span></div>` : ''}
-      ${c.notas ? `<div class="ec-row"><span class="ec-lbl">Notas</span><span class="ec-val" style="font-size:.8rem;white-space:pre-wrap;word-break:break-word">${esc(c.notas)}</span></div>` : ''}
-      <div class="ec-row"><span class="ec-lbl">Estado</span><span class="ec-val">${estado}</span></div>
-    </div>
-    <div class="ec-card">
-      <div class="ec-title"><i class="fas fa-file-invoice-dollar" style="margin-right:6px"></i>Detalles del Préstamo</div>
-      <div class="ec-row"><span class="ec-lbl">Monto prestado</span><span class="ec-val" style="color:var(--accent)">$${c.monto.toLocaleString('es-MX')}</span></div>
-      ${c.producto==='unico_30d' ? `
-      <div class="ec-row"><span class="ec-lbl">Plazo</span><span class="ec-val">30 días (pago único)</span></div>
-      <div class="ec-row"><span class="ec-lbl">Total a pagar</span><span class="ec-val">$${c.pq.toLocaleString('es-MX')}</span></div>
-      <div class="ec-row"><span class="ec-lbl">Fecha de inicio</span><span class="ec-val">${iniLabel}</span></div>
-      <div class="ec-row"><span class="ec-lbl">Estado de pago</span><span class="ec-val" style="color:${faltantes>0?'var(--warn)':'var(--accent)'}">${faltantes>0?'Pendiente':'Pagado'}</span></div>
-      ` : `
-      <div class="ec-row"><span class="ec-lbl">Plazo total</span><span class="ec-val">${c.nq} quincenas</span></div>
-      <div class="ec-row"><span class="ec-lbl">Pago quincenal</span><span class="ec-val">$${c.pq.toLocaleString('es-MX')}</span></div>
-      <div class="ec-row"><span class="ec-lbl">Fecha de inicio</span><span class="ec-val">${iniLabel}</span></div>
-      <div class="ec-row"><span class="ec-lbl">Quincenas pagadas</span><span class="ec-val" style="color:var(--accent)">${c.pagadas} de ${c.nq}</span></div>
-      <div class="ec-row"><span class="ec-lbl">Quincenas restantes</span><span class="ec-val" style="color:${faltantes > 0 ? 'var(--warn)' : 'var(--accent)'}">${faltantes}</span></div>
-      ${atrasadas > 0 ? `<div class="ec-row"><span class="ec-lbl">Quincenas atrasadas</span><span class="ec-val" style="color:var(--danger)">${atrasadas}</span></div>` : ''}
-      `}
-    </div>
-    ${recHtml}`;
-
-  const waBtn = document.getElementById('rep-wa-btn');
-  if (c.telefono) { waBtn.style.display = 'flex'; waBtn.onclick = () => sendReporte(c); }
-  else waBtn.style.display = 'none';
-  om('m-reporte');
-}
-
-function sendReporte(c) {
-  const { rec, atrasadas, capitalAt, faltantes, saldo, totalCobrar, esAtrasado, esLiquidado } = resumenCliente(c);
-  const iniLabel = c.inicio
-    ? new Date(c.inicio + 'T12:00:00').toLocaleDateString('es-MX', {day:'2-digit', month:'long', year:'numeric'})
-    : '—';
-  const estado = esLiquidado ? 'LIQUIDADO ✅'
-    : esAtrasado ? 'CON ATRASO ⚠️'
-    : 'AL CORRIENTE ✅';
-
-  const porDia = RECARGO_DIA[c.producto||'quincenal_fijo'] ?? 50;
-  let recStr = '';
-  if (rec.periodos.length) {
-    recStr += `\n\n⏰ *RECARGOS POR ATRASO ($${porDia}/día)*`;
-    recStr += rec.periodos.map(p =>
-      `\n• Q${p.idx}: ${p.diasAtraso} días → *$${p.recargo.toLocaleString('es-MX')}*`
-    ).join('');
-    recStr += `\n• Total recargo: *$${rec.total.toLocaleString('es-MX')}*`;
-    recStr += `\n\n💰 *TOTAL A LIQUIDAR*`;
-    recStr += `\n• Capital pendiente: $${capitalAt.toLocaleString('es-MX')}`;
-    recStr += `\n• Recargo acumulado: +$${rec.total.toLocaleString('es-MX')}`;
-    recStr += `\n• *TOTAL: $${totalCobrar.toLocaleString('es-MX')}*`;
-  } else {
-    recStr = `\n\n💰 *Saldo pendiente: $${saldo.toLocaleString('es-MX')}*`;
-  }
-
-  const detalleStr = c.producto === 'unico_30d'
-    ? `• Monto prestado: *$${c.monto.toLocaleString('es-MX')}*
-• Plazo: *30 días (pago único)*
-• Total a pagar: *$${c.pq.toLocaleString('es-MX')}*
-• Fecha de inicio: *${iniLabel}*`
-    : `• Monto prestado: *$${c.monto.toLocaleString('es-MX')}*
-• Plazo: *${c.nq} quincenas*
-• Pago quincenal: *$${c.pq.toLocaleString('es-MX')}*
-• Fecha de inicio: *${iniLabel}*`;
-
-  const avanceStr = c.producto === 'unico_30d'
-    ? `• Estado de pago: *${faltantes>0?'Pendiente':'Pagado'}*`
-    : `• Pagadas: *${c.pagadas} de ${c.nq}*
-• Restantes: *${faltantes}*${atrasadas > 0 ? `\n• Atrasadas: *${atrasadas}*` : ''}`;
-
-  const msg =
-`━━━━━━━━━━━━━━━━━━━━
-📋 *REPORTE PERSONAL*
-*HD Crédit*
-━━━━━━━━━━━━━━━━━━━━
-👤 *${c.nombre}*
-${c.telefono ? `📱 ${c.telefono}` : ''}
-
-📄 *DETALLES DEL PRÉSTAMO*
-${detalleStr}
-
-📊 *AVANCE DE PAGOS*
-${avanceStr}${recStr}
-
-📌 Estado: *${estado}*
-━━━━━━━━━━━━━━━━━━━━
-_Cualquier duda, con gusto te atendemos._
-_¡Gracias por tu confianza! 🙏_`;
-
-  window.open(`https://wa.me/52${c.telefono}?text=${encodeURIComponent(msg)}`, '_blank');
-  toast(`Reporte enviado a ${c.nombre}`, 'wa');
-}
-
-/* ============================================================
-   ESTADO DE CUENTA
-============================================================ */
-function openEC(id) {
-  const c = clientes.find(x=>x.id===id); if(!c) return;
-
-  const { faltantes, saldo, elapsed: elapsedEC, esAtrasado, esLiquidado } = resumenCliente(c);
-
-  // Timeline de quincenas — usa array real de pagos y marca vencidas en rojo
-  const pagosArr = (c.pagos || Array(c.nq).fill(false)).slice(0, c.nq);
-  const nextUnpaid = pagosArr.findIndex(p => !p);
-  const timeline = pagosArr.map((paid, i) => {
-    if (paid) return `<div class="ec-q ck" title="Q${i+1} pagada">${i+1}</div>`;
-    if (i < elapsedEC) return `<div class="ec-q" style="background:rgba(255,69,96,.15);border:1px solid var(--danger);color:var(--danger)" title="Q${i+1} vencida">${i+1}</div>`;
-    if (i === nextUnpaid) return `<div class="ec-q nx" title="Q${i+1} próxima">${i+1}</div>`;
-    return `<div class="ec-q pd" title="Q${i+1} pendiente">${i+1}</div>`;
-  }).join('');
-
-  const estado = esLiquidado ? '✅ Liquidado'
-    : esAtrasado ? '⚠️ Con atraso'
-    : '🟢 Al corriente';
-
-  document.getElementById('ec-body').innerHTML = `
-    <div class="ec-card">
-      <div class="ec-title">Información del préstamo</div>
-      <div class="ec-row"><span class="ec-lbl">Acreditado</span><span class="ec-val">${esc(c.nombre)}</span></div>
-      <div class="ec-row"><span class="ec-lbl">Monto prestado</span><span class="ec-val" style="color:var(--accent)">$${c.monto.toLocaleString('es-MX')}</span></div>
-      <div class="ec-row"><span class="ec-lbl">Plazo total</span><span class="ec-val">${c.producto==='unico_30d'?'30 días (pago único)':`${c.nq} quincenas`}</span></div>
-      <div class="ec-row"><span class="ec-lbl">${c.producto==='unico_30d'?'Total a pagar':'Pago quincenal'}</span><span class="ec-val">$${c.pq.toLocaleString('es-MX')}</span></div>
-      <div class="ec-row"><span class="ec-lbl">Estado</span><span class="ec-val">${estado}</span></div>
-    </div>
-    <div class="ec-card">
-      <div class="ec-title">Avance de pagos</div>
-      ${c.producto==='unico_30d' ? `
-      <div class="ec-row"><span class="ec-lbl">Estado de pago</span><span class="ec-val" style="color:${faltantes>0?'var(--warn)':'var(--accent)'}">${faltantes>0?'Pendiente':'Pagado'}</span></div>
-      ` : `
-      <div class="ec-row"><span class="ec-lbl">Quincenas pagadas</span><span class="ec-val" style="color:var(--accent)">${c.pagadas} de ${c.nq}</span></div>
-      <div class="ec-row"><span class="ec-lbl">Quincenas restantes</span><span class="ec-val" style="color:${faltantes>0?'var(--warn)':'var(--accent)'}">${faltantes}</span></div>
-      `}
-      <div class="ec-row"><span class="ec-lbl">Saldo pendiente</span><span class="ec-val" style="color:${saldo>0?'var(--warn)':'var(--accent)'}">$${saldo.toLocaleString('es-MX')}</span></div>
-      <div style="margin-top:12px">
-        <div class="ec-title" style="margin-bottom:8px">Progreso visual</div>
-        <div class="ec-timeline">${timeline}</div>
-        <div style="display:flex;gap:12px;margin-top:10px;font-size:.72rem;color:var(--muted)">
-          <span>🟢 Pagada</span><span style="color:var(--warn)">🟡 Próxima</span><span>⬜ Pendiente</span>
-        </div>
-      </div>
-    </div>`;
-
-  // WhatsApp button
-  const waBtn = document.getElementById('ec-wa-btn');
-  if (c.telefono) {
-    waBtn.style.display = 'flex';
-    waBtn.onclick = () => sendEC(c);
-  } else {
-    waBtn.style.display = 'none';
-  }
-
-  om('m-ec');
-}
-
-function sendEC(c) {
-  const { faltantes, saldo, esAtrasado, esLiquidado } = resumenCliente(c);
-  const estado = esLiquidado ? 'LIQUIDADO ✅'
-    : esAtrasado ? 'CON ATRASO ⚠️'
-    : 'AL CORRIENTE ✅';
-
-  const detalleStr = c.producto === 'unico_30d'
-    ? `• Monto prestado: *$${c.monto.toLocaleString('es-MX')}*
-• Plazo: *30 días (pago único)*
-• Total a pagar: *$${c.pq.toLocaleString('es-MX')}*`
-    : `• Monto prestado: *$${c.monto.toLocaleString('es-MX')}*
-• Plazo: *${c.nq} quincenas*
-• Pago quincenal: *$${c.pq.toLocaleString('es-MX')}*`;
-
-  const avanceStr = c.producto === 'unico_30d'
-    ? `• Estado de pago: *${faltantes>0?'Pendiente':'Pagado'}*`
-    : `• Quincenas pagadas: *${c.pagadas} de ${c.nq}*
-• Quincenas restantes: *${faltantes}*`;
-
-  const msg =
-`━━━━━━━━━━━━━━━━━━━━
-💳 *ESTADO DE CUENTA*
-*HD Crédit*
-━━━━━━━━━━━━━━━━━━━━
-👤 *${c.nombre}*
-
-📋 *DETALLES DEL PRÉSTAMO*
-${detalleStr}
-
-📊 *AVANCE DE PAGOS*
-${avanceStr}
-• Saldo pendiente: *$${saldo.toLocaleString('es-MX')}*
-
-📌 Estado: *${estado}*
-━━━━━━━━━━━━━━━━━━━━
-_Cualquier duda, con gusto te atendemos._
-_¡Gracias por tu confianza! 🙏_`;
-
-  window.open(`https://wa.me/52${c.telefono}?text=${encodeURIComponent(msg)}`, '_blank');
-  toast(`Estado de cuenta enviado a ${c.nombre}`, 'wa');
-}
-
-/* ============================================================
-   WHATSAPP RECORDATORIO
-============================================================ */
-function waCliente(id) {
-  const c = clientes.find(x=>x.id===id); if(!c) return;
-  if (!c.telefono) { toast('Sin teléfono registrado', 'wrn'); return; }
-  const faltantes = c.nq - c.pagadas;
-  const msg = c.producto === 'unico_30d'
-    ? `Hola ${c.nombre} 👋\n\nTe recordamos que tu pago único de *$${c.pq.toLocaleString('es-MX')}* está próximo a vencer.\n\n💰 Saldo: $${c.saldo.toLocaleString('es-MX')}\n\n¡Gracias! — HD Crédit 🙏`
-    : `Hola ${c.nombre} 👋\n\nTe recordamos que tu pago quincenal de *$${c.pq.toLocaleString('es-MX')}* está próximo.\n\n📊 Quincenas: ${c.pagadas}/${c.nq} · Faltan: ${faltantes}\n💰 Saldo: $${c.saldo.toLocaleString('es-MX')}\n\n¡Gracias! — HD Crédit 🙏`;
-  window.open(`https://wa.me/52${c.telefono}?text=${encodeURIComponent(msg)}`, '_blank');
-}
-
-function waAll() {
-  const activos = clientes.filter(c => c.saldo > 0 && c.telefono);
-  if (!activos.length) { toast('Sin acreditados con teléfono', 'wrn'); return; }
-  if (!confirm(`¿Enviar recordatorio a ${activos.length} acreditados?\n\nNota: el navegador puede bloquear ventanas emergentes después de la primera. Permite las ventanas emergentes si se solicita.`)) return;
-  activos.forEach((c, i) => setTimeout(() => waCliente(c.id), i * 900));
-  toast(`Iniciando envío a ${activos.length} acreditados — permite ventanas emergentes si se solicita`, 'ok');
-}
-
-/* ============================================================
-   RENDER DASHBOARD
-============================================================ */
-function renderDash() {
-  const morosos = clientes.filter(c=>calcAlerta(c)==='ATRASADO');
-  const activos = clientes.filter(c=>c.saldo>0);
-  const capital = clientes.reduce((a,c)=>a+c.monto,0);
-  const saldoTotal = clientes.reduce((a,c)=>a+c.saldo,0);
-  const qCobro = activos.reduce((a,c)=>a+c.pq,0);
-  const qKey = curQKey();
-  const cobrado = Math.max(0, historial
-    .filter(h=>h.qKey===qKey)
-    .reduce((a,h)=>h.accion==='PAGO' ? a+(h.monto||0) : h.accion==='REVERSO' ? a-(h.monto||0) : a, 0));
-
-  set('s-total', clientes.length);
-  set('s-capital', '$'+capital.toLocaleString('es-MX'));
-  set('s-morosos', morosos.length);
-  set('s-saldo', '$'+saldoTotal.toLocaleString('es-MX'));
-  set('s-qcobro', '$'+qCobro.toLocaleString('es-MX'));
-  set('s-cobrado', '$'+cobrado.toLocaleString('es-MX'));
-  set('dash-date', new Date().toLocaleDateString('es-MX',{weekday:'long',year:'numeric',month:'long',day:'numeric'}));
-
-  // Badge sidebar + título dinámico
-  const nb = document.getElementById('nb-late');
-  morosos.length > 0 ? (nb.textContent=morosos.length, nb.style.display='') : nb.style.display='none';
-  document.title = morosos.length ? `⚠️ ${morosos.length} morosos · HD Crédit` : 'HD Crédit — Control de Pagos';
-
-  // Morosos
-  const ml = document.getElementById('d-morosos');
-  ml.innerHTML = morosos.length ? morosos.slice(0,6).map(c=>`
-    <div class="mi">
-      <div class="mav">${esc((c.nombre||'?')[0])}</div>
-      <div><div class="mn">${esc(c.nombre||'—')}</div><div class="md">$${(c.saldo||0).toLocaleString('es-MX')} · ${(c.nq||0)-(c.pagadas||0)}Q rest.</div></div>
-      ${c.telefono?`<button class="btn btn-wa btn-sm btn-ic" onclick="waCliente('${c.id}')" style="margin-left:auto"><i class="fab fa-whatsapp"></i></button>`:''}
-    </div>`).join('')
-    : '<p style="color:var(--muted);font-size:.84rem;text-align:center;padding:18px">✅ Sin morosos</p>';
-
-  // Próximos
-  const prox = clientes.filter(c=>c.saldo>0&&(c.nq-c.pagadas)<=2).sort((a,b)=>a.pagadas-b.pagadas);
-  const pl = document.getElementById('d-prox');
-  pl.innerHTML = prox.length ? prox.slice(0,5).map(c=>`
-    <div class="mi">
-      <div class="mav" style="background:rgba(255,184,0,.14);border-color:rgba(255,184,0,.3);color:var(--warn)">${esc((c.nombre||'?')[0])}</div>
-      <div><div class="mn">${esc(c.nombre||'—')}</div><div style="font-size:.73rem;color:var(--warn);font-family:'DM Mono',monospace">${(c.nq||0)-(c.pagadas||0)}Q restantes</div></div>
-      <span class="badge by" style="margin-left:auto">${(c.nq||0)-(c.pagadas||0)}Q</span>
-    </div>`).join('')
-    : '<p style="color:var(--muted);font-size:.84rem;text-align:center;padding:18px">Sin vencimientos próximos</p>';
-
-  // Mini chart
-  const qs = getQuincenas(6);
-  const vals = qs.map(q => Math.max(0, historial.filter(h=>h.qKey===q.key).reduce((a,h)=>h.accion==='PAGO' ? a+(h.monto||0) : h.accion==='REVERSO' ? a-(h.monto||0) : a, 0)));
-  const mx = Math.max(...vals, 1);
-  document.getElementById('d-chart').innerHTML = qs.map((q,i)=>`
-    <div class="bc">
-      <div class="bv" style="height:${Math.max(8,(vals[i]/mx)*130)}px" title="$${vals[i].toLocaleString('es-MX')}"></div>
-      <div class="bl">${q.label.split('·')[0].trim()}</div>
-    </div>`).join('');
-}
-
-/* ============================================================
-   RENDER CLIENTES
-============================================================ */
-function renderC(list) {
-  const data = list || clientes;
-  const tb = document.getElementById('tb-c');
-  if (!data.length) { tb.innerHTML='<tr><td colspan="12" style="text-align:center;padding:28px;color:var(--muted)">Sin acreditados</td></tr>'; return; }
-  tb.innerHTML = data.map((c,i)=>{
-    const pct = c.nq ? Math.round(((c.pagadas||0)/c.nq)*100) : 0;
-    const est = c.saldo===0?'liq':calcAlerta(c)==='ATRASADO'?'at':'ok';
-    const eb = est==='liq'?'<span class="badge bi">Liquidado</span>'
-      :est==='at'?'<span class="badge br">⚠ Atrasado</span>'
-      :'<span class="badge bg">✓ Al corriente</span>';
-    const esNuevo = (c.pagadas||0) === 0 && (c.saldo||0) > 0;
-    const badgeNuevo = esNuevo ? '<span class="badge bnn" style="margin-left:5px;font-size:.62rem;vertical-align:middle"><i class="fas fa-certificate" style="font-size:.55rem;margin-right:2px"></i>Nuevo</span>' : '';
-    const fv = calcVenc(c.inicio, c.nq, c.producto);
-    const iniLabel = c.inicio ? new Date(c.inicio+'T12:00:00').toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'2-digit'}) : '—';
-    const elapsed = c.inicio ? qsElapsed(c.inicio, c.producto) : 0;
-    const iniTitle = c.inicio ? `Inicio: ${c.inicio} | Q esperadas: ${Math.min(elapsed,c.nq)} | Q pagadas: ${c.pagadas||0}` : 'Sin fecha de inicio';
-    return `<tr>
-      <td><span style="font-family:'DM Mono',monospace;color:var(--muted)">${String(i+1).padStart(2,'0')}</span></td>
-      <td><strong>${esc(c.nombre||'—')}</strong>${badgeNuevo}</td>
-      <td><span style="font-family:'DM Mono',monospace;color:var(--accent)">$${c.monto.toLocaleString('es-MX')}</span></td>
-      <td><span style="font-family:'DM Mono',monospace">$${c.pq.toLocaleString('es-MX')}</span></td>
-      <td><span class="badge bb">${plazoLabel(c)}</span></td>
-      <td><span style="font-family:'DM Mono',monospace">${c.producto==='unico_30d' ? (c.pagadas>=1?'Pagado':'Pendiente') : `${c.pagadas}/${c.nq}`}</span></td>
-      <td><div class="pb"><div class="pf ${pct<50?'d':pct<80?'w':''}" style="width:${pct}%"></div></div></td>
-      <td><span style="font-family:'DM Mono',monospace;color:${c.saldo>0?'var(--warn)':'var(--accent)'}">$${c.saldo.toLocaleString('es-MX')}</span></td>
-      <td>${eb}</td>
-      <td title="${iniTitle}"><span style="font-family:'DM Mono',monospace;font-size:.76rem;color:var(--muted)">${iniLabel}</span></td>
-      <td><span style="font-family:'DM Mono',monospace;font-size:.76rem;color:var(--muted)">${fv}</span></td>
-      <td><div style="display:flex;gap:5px">
-        ${c.producto==='unico_30d' ? (c.saldo>0
-          ? `<button class="btn btn-s btn-sm btn-ic" data-pago="${c.id}_0" onclick="initPago('${c.id}',0)" title="Toca 2 veces para marcar pagado" style="color:var(--accent)"><i class="far fa-circle"></i></button>`
-          : `<button class="btn btn-s btn-sm btn-ic" onclick="openReverso('${c.id}')" title="Pagado · clic para revertir" style="color:var(--accent)"><i class="fas fa-check"></i></button>`) : ''}
-        <button class="btn btn-s btn-sm btn-ic" onclick="openReporte('${c.id}')" title="Reporte Personal" style="color:var(--purple)"><i class="fas fa-clipboard-list"></i></button>
-        <button class="btn btn-s btn-sm btn-ic" onclick="openEC('${c.id}')" title="Estado de cuenta"><i class="fas fa-file-invoice"></i></button>
-        <button class="btn btn-s btn-sm btn-ic" onclick="editC('${c.id}')" title="Editar"><i class="fas fa-edit"></i></button>
-        ${c.telefono?`<button class="btn btn-wa btn-sm btn-ic" onclick="waCliente('${c.id}')" title="WhatsApp"><i class="fab fa-whatsapp"></i></button>`:''}
-        <button class="btn btn-d btn-sm btn-ic" onclick="confirmDel('${c.id}')" title="Eliminar"><i class="fas fa-trash"></i></button>
-      </div></td>
-    </tr>`;
-  }).join('');
-}
-
-let _filterCTimer;
-function filterC() {
-  clearTimeout(_filterCTimer);
-  _filterCTimer = setTimeout(() => {
-    const q = document.getElementById('srch-c').value.toLowerCase();
-    const est = document.getElementById('flt-est').value;
-    const plazo = document.getElementById('flt-plazo').value;
-    const prod = document.getElementById('flt-prod').value;
-    renderC(clientes.filter(c=>{
-      const e = c.saldo===0?'liquidado':calcAlerta(c)==='ATRASADO'?'atrasado':'al_corriente';
-      return (c.nombre||'').toLowerCase().includes(q)
-        && (!est||e===est)
-        && (!plazo||String(c.nq)===plazo)
-        && (!prod||(c.producto||'quincenal_fijo')===prod);
-    }));
-  }, 180);
-}
-
-function calcVenc(inicio, nq, producto = 'quincenal_fijo') {
-  if (!inicio||!nq) return '—';
-  const d = getQDueDate(inicio, nq - 1, producto);
-  if (!d) return '—';
-  return d.toLocaleDateString('es-MX',{day:'2-digit',month:'short',year:'2-digit'});
-}
-
-/* ============================================================
-   DOBLE TOQUE + DESHACER
-============================================================ */
-async function initPago(cid, qIdx) {
-  const key = cid + '_' + qIdx;
-  const btn = document.querySelector(`[data-pago="${key}"]`);
-  if (_pendingPago[key]) {
-    // segundo toque — confirmar
-    clearTimeout(_pendingPago[key]);
-    delete _pendingPago[key];
-    if (btn) { btn.classList.remove('confirming'); btn.innerHTML = _pendingOrigHtml[key] || ''; }
-    delete _pendingOrigHtml[key];
-    await togglePago(cid, qIdx);
-  } else {
-    // primer toque — pedir confirmación visual
-    if (!btn) return;
-    _pendingOrigHtml[key] = btn.innerHTML;
-    btn.classList.add('confirming');
-    btn.innerHTML = '<i class="fas fa-question"></i>';
-    _pendingPago[key] = setTimeout(() => {
-      delete _pendingPago[key];
-      const freshBtn = document.querySelector(`[data-pago="${key}"]`);
-      if (freshBtn) {
-        freshBtn.classList.remove('confirming');
-        freshBtn.innerHTML = _pendingOrigHtml[key] || '';
-      }
-      delete _pendingOrigHtml[key];
-    }, 2500);
-  }
-}
-
-function showUndo(nombre, wasPago) {
-  const existing = document.getElementById('undo-bar');
-  if (existing) { clearTimeout(Number(existing.dataset.timer)); existing.remove(); }
-  const bar = document.createElement('div');
-  bar.id = 'undo-bar';
-  bar.innerHTML = `
-    <span class="undo-msg">${wasPago ? '✅' : '↩️'} <strong>${esc(nombre)}</strong> — ${wasPago ? 'cobrado' : 'revertido'}</span>
-    <button class="undo-btn" onclick="undoLastPago()"><i class="fas fa-undo"></i> Deshacer</button>
-    <div class="undo-prog"></div>`;
-  const container = document.getElementById('cl-items');
-  if (container) container.parentNode.insertBefore(bar, container);
-  const t = setTimeout(() => { const b = document.getElementById('undo-bar'); if(b) b.remove(); }, 8000);
-  bar.dataset.timer = String(t);
-}
-
-async function undoLastPago() {
-  if (!_lastPago) return;
-  const bar = document.getElementById('undo-bar');
-  if (bar) { clearTimeout(Number(bar.dataset.timer)); bar.remove(); }
-  _undoing = true;
-  try { await togglePago(_lastPago.cid, _lastPago.qIdx); } finally { _undoing = false; }
-  _lastPago = null;
-  toast('↩️ Acción deshecha', 'wrn');
-}
-
-/* ============================================================
-   RENDER CHECKLIST
-============================================================ */
-function renderCL() {
-  const qKey = document.getElementById('qsel').value;
-  // Calcular isPaid por adelantado para poder ordenar
-  const activos = clientes
-    // El checklist está organizado por quincena — el préstamo a 30 días no
-    // pertenece a ninguna en particular, se cobra desde Acreditados/Morosos
-    .filter(c => (c.saldo > 0 || c.pagadas < c.nq) && (c.producto||'quincenal_fijo') !== 'unico_30d')
-    .map(c => ({...c, _isPaid: (() => { const h = historial.find(e => e.clienteId===c.id && e.qKey===qKey); return h?.accion === 'PAGO'; })() }))
-    .sort((a, b) => {
-      if (a._isPaid === b._isPaid) return 0;
-      return a._isPaid ? 1 : -1; // pagados van al final
-    });
-  let pagados = 0;
-  const html = activos.map((c,i)=>{
-    const isPaid = c._isPaid;
-    if(isPaid) pagados++;
-    const isLate = calcAlerta(c)==='ATRASADO';
-    const esNuevo = (c.pagadas||0) === 0 && (c.saldo||0) > 0;
-    const cls = isPaid?'ck':isLate?'lt':'u';
-    const ico = isPaid?'fas fa-check':isLate?'fas fa-exclamation':'far fa-circle';
-    // Usar la primera quincena sin pagar (no necesariamente c.pagadas, que puede apuntar a una ya pagada tras un reverso)
-    const _pagosArr = c.pagos || Array(c.nq).fill(false).map((_,j) => j < (c.pagadas||0));
-    const _nextIdx = _pagosArr.findIndex(p => !p);
-    const nextQIdx = _nextIdx >= 0 ? _nextIdx : (c.pagadas||0);
-    return `<div class="ci${isPaid?' paid':''}">
-      <div class="cn">${String(i+1).padStart(2,'0')}</div>
-      <div>
-        <div class="cname">${esc(c.nombre||'—')}</div>
-        ${esNuevo ? `<span class="badge bnn" style="font-size:.62rem;padding:1px 7px;margin-bottom:1px;display:inline-flex;align-items:center"><i class="fas fa-certificate" style="font-size:.55rem;margin-right:3px"></i>Cliente Nuevo</span>` : ''}
-        <div style="font-size:.7rem;margin-top:2px">${isPaid?'<span style="color:var(--accent);font-weight:700">✓ Cobrado esta quincena</span>':`<span style="color:var(--muted)">${c.pagadas||0}/${c.nq}Q · ${c.nq-(c.pagadas||0)} restantes</span>`}</div>
-      </div>
-      <div class="cdet">$${(c.saldo||0).toLocaleString('es-MX')}<br><span style="font-size:.68rem;color:var(--muted)">saldo</span></div>
-      <div class="camt">$${(c.pq||0).toLocaleString('es-MX')}</div>
-      <div style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">
-        ${isPaid
-          ?`<button class="pb2 ck" onclick="openReverso('${c.id}')" title="Cobrado · clic para retroceder pago"><i class="fas fa-check"></i></button>`
-          :`<button class="pb2 ${cls}" data-pago="${c.id}_${nextQIdx}" onclick="initPago('${c.id}',${nextQIdx})" title="Toca 2 veces para cobrar"><i class="${ico}"></i></button>`}
-        <button class="pb2 u" onclick="openReporte('${c.id}')" title="Morosos y Recargos" style="width:30px;height:30px;font-size:.72rem"><i class="fas fa-clipboard-list" style="color:var(--purple)"></i></button>
-        <button class="pb2 u" onclick="openReverso('${c.id}')" title="Retroceder pago" style="width:30px;height:30px;font-size:.72rem"><i class="fas fa-undo" style="color:var(--danger)"></i></button>
-        <button class="pb2 u" onclick="openEC('${c.id}')" title="Estado de cuenta" style="width:30px;height:30px;font-size:.72rem"><i class="fas fa-file-invoice" style="color:var(--info)"></i></button>
-        ${c.telefono?`<button class="pb2 u" onclick="waCliente('${c.id}')" title="WhatsApp" style="width:30px;height:30px;font-size:.72rem"><i class="fab fa-whatsapp" style="color:#25d366"></i></button>`:''}
-      </div>
-    </div>`;
-  }).join('') || '<div style="padding:32px;text-align:center;color:var(--muted)">Sin acreditados activos</div>';
-  document.getElementById('cl-items').innerHTML = html;
-  const total = activos.length;
-  const pct = total ? Math.round((pagados/total)*100) : 0;
-  document.getElementById('cl-prog').textContent = `${pagados} / ${total} cobrados`;
-  document.getElementById('cl-pct').textContent = pct + '%';
-  const bar = document.getElementById('cl-bar');
-  bar.style.width = pct + '%';
-  bar.className = 'pf ' + (pct<50?'d':pct<80?'w':'');
-}
-
-/* ============================================================
-   RENDER HISTORIAL
-============================================================ */
-function renderH(list) {
-  const data = (list||historial).slice(0,300);
-  const tb = document.getElementById('tb-h');
-  tb.innerHTML = data.length ? data.map(h=>`<tr>
-    <td><strong>${esc(h.nombre||'—')}</strong></td>
-    <td><span style="font-family:'DM Mono',monospace;color:var(--accent)">$${(h.monto||0).toLocaleString('es-MX')}</span></td>
-    <td><span style="font-family:'DM Mono',monospace;font-size:.76rem">${esc(h.qKey||'—')}</span></td>
-    <td>${esc(h.fecha||'—')}</td>
-    <td style="font-family:'DM Mono',monospace;font-size:.75rem;color:var(--muted)">${esc(h.hora||'—')}</td>
-    <td><span class="badge ${h.accion==='PAGO'?'bg':'by'}">${esc(h.accion||'—')}</span></td>
-  </tr>`).join('')
-    : '<tr><td colspan="6" style="text-align:center;padding:28px;color:var(--muted)">Sin registros</td></tr>';
-}
-
-let _filterHTimer;
-function filterH() {
-  clearTimeout(_filterHTimer);
-  _filterHTimer = setTimeout(() => {
-    const q = document.getElementById('srch-h').value.toLowerCase();
-    renderH(historial.filter(h=>(h.nombre||'').toLowerCase().includes(q)));
-  }, 180);
-}
-
-/* ============================================================
-   RENDER REPORTES
-============================================================ */
-function renderRep() {
-  const cap = clientes.reduce((a,c)=>a+c.monto,0);
-  const saldoT = clientes.reduce((a,c)=>a+c.saldo,0);
-  const morosos = clientes.filter(c=>calcAlerta(c)==='ATRASADO').length;
-  document.getElementById('rep-stats').innerHTML = `
-    <div class="sc"><div class="si"><i class="fas fa-users"></i></div><div class="sv">${clientes.length}</div><div class="sl">Total Acreditados</div></div>
-    <div class="sc w"><div class="si"><i class="fas fa-money-bill"></i></div><div class="sv">$${cap.toLocaleString('es-MX')}</div><div class="sl">Capital Total</div></div>
-    <div class="sc d"><div class="si"><i class="fas fa-exclamation"></i></div><div class="sv">${morosos}</div><div class="sl">Morosos</div></div>
-    <div class="sc i"><div class="si"><i class="fas fa-coins"></i></div><div class="sv">$${saldoT.toLocaleString('es-MX')}</div><div class="sl">Saldo por Cobrar</div></div>`;
-  document.getElementById('tb-rep').innerHTML = clientes.map(c=>{
-    const est = c.saldo===0?'Liquidado':calcAlerta(c)==='ATRASADO'?'Atrasado':'Activo';
-    const bc = est==='Liquidado'?'bi':est==='Atrasado'?'br':'bg';
-    return `<tr>
-      <td><strong>${esc(c.nombre)}</strong></td>
-      <td style="font-family:'DM Mono',monospace">$${c.monto.toLocaleString('es-MX')}</td>
-      <td style="font-family:'DM Mono',monospace">${c.pagadas}/${c.nq}</td>
-      <td style="font-family:'DM Mono',monospace;color:var(--warn)">$${c.saldo.toLocaleString('es-MX')}</td>
-      <td><span class="badge ${bc}">${est}</span></td>
-    </tr>`;
-  }).join('');
-}
-
-/* ============================================================
-   TABLA FACTORES
-============================================================ */
-function renderTF() {
-  const ms = [1000,2000,3000,4000,5000,6000,7000,8000,9000,10000,11000,12000,13000,14000,15000];
-  document.getElementById('tb-f').innerHTML = ms.map(m=>`<tr>
-    <td><strong style="font-family:'DM Mono',monospace">$${m.toLocaleString('es-MX')}</strong></td>
-    <td style="font-family:'DM Mono',monospace;color:var(--accent)">$${TF[m][6]}</td>
-    <td style="font-family:'DM Mono',monospace">$${TF[m][8]}</td>
-    <td style="font-family:'DM Mono',monospace">$${TF[m][10]}</td>
-    <td style="font-family:'DM Mono',monospace">${TF[m][12]?'$'+TF[m][12]:'<span class="badge bb">N/A</span>'}</td>
-    <td><span class="badge bg">+${Math.round(((TF[m][6]*6-m)/m)*100)}%</span></td>
-  </tr>`).join('');
-
-  const ms30 = Object.keys(TF30).map(Number).sort((a,b)=>a-b);
-  document.getElementById('tb-f30').innerHTML = ms30.map(m=>`<tr>
-    <td><strong style="font-family:'DM Mono',monospace">$${m.toLocaleString('es-MX')}</strong></td>
-    <td style="font-family:'DM Mono',monospace;color:var(--accent)">$${TF30[m].toLocaleString('es-MX')}</td>
-    <td><span class="badge bg">+${Math.round(((TF30[m]-m)/m)*100)}%</span></td>
-  </tr>`).join('');
-}
-
-/* ============================================================
-   EXPORT / IMPORT
-============================================================ */
-function doExport() {
-  const rows = [['#','Nombre','Producto','Monto','Pago Q','Plazo','Q Pagadas','Saldo','Estado'],
-    ...clientes.map((c,i)=>[i+1,c.nombre,c.producto==='unico_30d'?'Préstamo 30 Días':'Quincenal',c.monto,c.pq,plazoLabel(c),c.pagadas,c.saldo,
-      c.saldo===0?'Liquidado':calcAlerta(c)||'Al corriente'])];
-  const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));
-  a.download = 'HDCredit_' + new Date().toISOString().split('T')[0] + '.csv';
-  a.click();
-  toast('Exportado CSV ✅', 'ok');
-}
-
-function doExportXLSX() {
-  if (typeof XLSX === 'undefined') {
-    toast('Cargando exportador Excel...', 'wrn');
-    const s = document.createElement('script');
-    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
-    s.onload = _generateXLSX;
-    s.onerror = () => toast('Error al cargar librería Excel', 'err');
-    document.head.appendChild(s);
-  } else {
-    _generateXLSX();
-  }
-}
-
-function _generateXLSX() {
-  if (!clientes.length) { toast('No hay datos para exportar', 'err'); return; }
-
-  const wb = XLSX.utils.book_new();
-
-  // Hoja 1: Acreditados
-  const ws1 = XLSX.utils.aoa_to_sheet([
-    ['#','Nombre','Producto','Monto','Pago Q','Plazo','Q Pagadas','Q Restantes','Saldo','Estado','Inicio','Teléfono','Notas'],
-    ...clientes.map((c, i) => [
-      i + 1, c.nombre, c.producto==='unico_30d'?'Préstamo 30 Días':'Quincenal', c.monto, c.pq, plazoLabel(c),
-      c.pagadas, c.nq - c.pagadas, c.saldo,
-      c.saldo === 0 ? 'Liquidado' : calcAlerta(c) === 'ATRASADO' ? 'Atrasado' : 'Al corriente',
-      c.inicio || '', c.telefono || '', c.notas || ''
-    ])
-  ]);
-  ws1['!cols'] = [
-    {wch:4},{wch:22},{wch:16},{wch:10},{wch:10},{wch:8},
-    {wch:10},{wch:12},{wch:12},{wch:14},{wch:12},{wch:14},{wch:22}
-  ];
-  XLSX.utils.book_append_sheet(wb, ws1, 'Acreditados');
-
-  // Hoja 2: Historial
-  if (historial.length) {
-    const ws2 = XLSX.utils.aoa_to_sheet([
-      ['Acreditado','Monto','Quincena','Fecha','Hora','Tipo'],
-      ...historial.slice(0, 1000).map(h => [
-        h.nombre || '', h.monto || 0, h.qKey || '',
-        h.fecha || '', h.hora || '', h.accion || ''
-      ])
-    ]);
-    ws2['!cols'] = [{wch:22},{wch:10},{wch:14},{wch:14},{wch:12},{wch:10}];
-    XLSX.utils.book_append_sheet(wb, ws2, 'Historial');
-  }
-
-  const fname = 'HDCredit_' + new Date().toISOString().split('T')[0] + '.xlsx';
-  XLSX.writeFile(wb, fname);
-  toast('Excel descargado ✅', 'ok');
-}
-
-function doExportJSON() {
-  if (!clientes.length) { toast('No hay datos para exportar', 'err'); return; }
-  const payload = { clientes, historial, ts: new Date().toISOString(), v: '2.1' };
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'}));
-  a.download = 'HDCredit_respaldo_' + new Date().toISOString().split('T')[0] + '.json';
-  a.click();
-  toast('Respaldo JSON descargado ✅', 'ok');
-}
-
-function doImportJSON() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.json,application/json';
-  input.onchange = e => {
-    const file = e.target.files[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      try {
-        const payload = JSON.parse(ev.target.result);
-        if (!payload.clientes || !Array.isArray(payload.clientes) || !payload.clientes.length) {
-          toast('Archivo inválido o sin clientes', 'err'); return;
-        }
-        // Validar estructura de cada cliente
-        const validos = payload.clientes.filter(c =>
-          c && typeof c === 'object'
-          && typeof c.nombre === 'string' && c.nombre.trim()
-          && Number.isFinite(c.nq) && c.nq > 0
-          && Number.isFinite(c.monto) && c.monto > 0
-          && Number.isFinite(c.pagadas)
-        );
-        const omitidos = payload.clientes.length - validos.length;
-        if (!validos.length) { toast('Archivo inválido: sin registros con estructura correcta', 'err'); return; }
-        const tsLabel = payload.ts ? new Date(payload.ts).toLocaleDateString('es-MX') : 'fecha desconocida';
-        const msg = `¿Importar ${validos.length} clientes del respaldo del ${tsLabel}?\n\nEsto reemplazará los datos actuales.`
-          + (omitidos ? `\n\n⚠️ Se omitirán ${omitidos} registros con datos inválidos.` : '');
-        if (!confirm(msg)) return;
-        autoBackup();
-        clientes = validos;
-        historial = Array.isArray(payload.historial) ? payload.historial : [];
-        historial.sort((a, b) => new Date(b.ts) - new Date(a.ts));
-        syncAlertas();
-        saveLocal();
-        refresh();
-        if (omitidos) toast(`${validos.length} clientes restaurados · ${omitidos} omitidos por datos inválidos`, 'wrn');
-        else toast(`${validos.length} clientes restaurados ✅`, 'ok');
-      } catch(err) {
-        toast('Error al leer el archivo: ' + err.message, 'err');
-      }
-    };
-    reader.readAsText(file);
-  };
-  input.click();
-}
-
-/* ============================================================
-   MOROSOS Y RECARGOS
-============================================================ */
-function getQDueDate(inicio, periodIdx, producto = 'quincenal_fijo') {
-  if (!inicio) return null;
-  const start = new Date(inicio + 'T12:00:00');
-  if (producto === 'unico_30d') {
-    // Pago único: siempre el mismo vencimiento, 30 días naturales después del inicio
-    const due = new Date(start);
-    due.setDate(due.getDate() + 30);
-    return due;
-  }
-  let d = new Date(start);
-  if (d.getDate() < 15) {
-    d.setDate(15);
-  } else {
-    d = new Date(d.getFullYear(), d.getMonth() + 1, 0);
-  }
-  d = nextQBoundary(d);
-  for (let i = 0; i < periodIdx; i++) d = nextQBoundary(d);
-  return d;
-}
-
-function calcRecargoPorCliente(c) {
-  if (!c || !c.inicio || calcAlerta(c) !== 'ATRASADO') return { periodos: [], total: 0 };
-  const producto = c.producto || 'quincenal_fijo';
-  const porDia = RECARGO_DIA[producto] ?? 50;
-  const elapsed = Math.min(qsElapsed(c.inicio, producto), c.nq);
-  const atrasadas = elapsed - c.pagadas;
-  if (atrasadas <= 0) return { periodos: [], total: 0 };
-  const today = new Date();
-  const periodos = [];
-  for (let i = c.pagadas; i < elapsed; i++) {
-    const dueDate = getQDueDate(c.inicio, i, producto);
-    if (!dueDate) continue;
-    const diasAtraso = Math.max(0, Math.floor((today - dueDate) / (1000 * 60 * 60 * 24)));
-    periodos.push({ idx: i + 1, dueDate, diasAtraso, recargo: diasAtraso * porDia });
-  }
-  return { periodos, total: periodos.reduce((a, p) => a + p.recargo, 0) };
-}
-
-/* ============================================================
-   RESUMEN DE CLIENTE — cálculo único de saldo/atraso/recargo,
-   usado por Reporte Personal y Estado de Cuenta (antes cada uno
-   recalculaba el saldo por separado y podían mostrar cifras distintas)
-============================================================ */
-function resumenCliente(c) {
-  const elapsed = Math.min(qsElapsed(c.inicio, c.producto), c.nq);
-  const atrasadas = Math.max(0, elapsed - c.pagadas);
-  const capitalAt = atrasadas * c.pq;
-  const faltantes = c.nq - c.pagadas;
-  const saldo = faltantes * c.pq;
-  const rec = calcRecargoPorCliente(c);
-  const totalCobrar = capitalAt + rec.total;
-  const esAtrasado = calcAlerta(c) === 'ATRASADO';
-  const esLiquidado = saldo === 0;
-  return { elapsed, atrasadas, capitalAt, faltantes, saldo, rec, totalCobrar, esAtrasado, esLiquidado };
-}
-
-// Etiqueta de plazo/periodos legible según producto — evita mostrar "1Q"
-// en un préstamo de pago único a 30 días
-function plazoLabel(c) {
-  return c.producto === 'unico_30d' ? 'Pago único' : `${c.nq}Q`;
-}
-function periodosLabel(n, c) {
-  return c.producto === 'unico_30d' ? (n > 0 ? 'Vencido' : 'Al corriente') : `${n}Q`;
-}
-
-function switchMorososTab(tab) {
-  document.querySelectorAll('#v-morosos .tab-btn').forEach(t => t.classList.toggle('on', t.dataset.tab === tab));
-  document.querySelectorAll('#v-morosos .tab-panel').forEach(p => p.classList.toggle('on', p.id === 'mp-' + tab));
-}
-
-function renderMorosos() {
-  const morosos = clientes.filter(c => calcAlerta(c) === 'ATRASADO' && (c.saldo||0) > 0);
-
-  const nbMor = document.getElementById('nb-mor');
-  if (nbMor) { nbMor.textContent = morosos.length; nbMor.style.display = morosos.length ? '' : 'none'; }
-
-  const totalCapital = morosos.reduce((a, c) => {
-    const elapsed = Math.min(qsElapsed(c.inicio||'', c.producto), c.nq||0);
-    return a + Math.max(0, elapsed - (c.pagadas||0)) * (c.pq||0);
-  }, 0);
-  const totalRecargos = morosos.reduce((a, c) => a + calcRecargoPorCliente(c).total, 0);
-
-  const elMrCount = document.getElementById('mr-count');
-  if (elMrCount) {
-    set('mr-count', morosos.length);
-    set('mr-capital', '$' + totalCapital.toLocaleString('es-MX'));
-    set('mr-recargos', '$' + totalRecargos.toLocaleString('es-MX'));
-    set('mr-total', '$' + (totalCapital + totalRecargos).toLocaleString('es-MX'));
-  }
-
-  const tb1 = document.getElementById('tb-at');
-  if (tb1) {
-    tb1.innerHTML = !morosos.length
-      ? '<tr><td colspan="6" style="text-align:center;padding:28px;color:var(--muted)">✅ Sin pagos atrasados</td></tr>'
-      : morosos.map(c => {
-          const elapsed = Math.min(qsElapsed(c.inicio, c.producto), c.nq);
-          const atrasadas = Math.max(0, elapsed - c.pagadas);
-          const capitalAt = atrasadas * c.pq;
-          const firstDue = c.pagadas < elapsed ? getQDueDate(c.inicio, c.pagadas, c.producto) : null;
-          const firstDueLbl = firstDue
-            ? firstDue.toLocaleDateString('es-MX', {day:'2-digit',month:'short',year:'2-digit'})
-            : '—';
-          return `<tr>
-            <td><strong>${esc(c.nombre)}</strong></td>
-            <td><span class="badge br">${periodosLabel(atrasadas, c)}</span></td>
-            <td><span style="font-family:'DM Mono',monospace">$${c.pq.toLocaleString('es-MX')}</span></td>
-            <td><span style="font-family:'DM Mono',monospace;color:var(--danger)">$${capitalAt.toLocaleString('es-MX')}</span></td>
-            <td><span style="font-family:'DM Mono',monospace;font-size:.76rem;color:var(--muted)">${firstDueLbl}</span></td>
-            <td><div style="display:flex;gap:5px">
-              <button class="btn btn-s btn-sm btn-ic" onclick="openReporte('${c.id}')" title="Reporte Personal" style="color:var(--purple)"><i class="fas fa-clipboard-list"></i></button>
-              <button class="btn btn-s btn-sm btn-ic" onclick="openEC('${c.id}')" title="Estado de cuenta"><i class="fas fa-file-invoice"></i></button>
-              ${c.telefono ? `<button class="btn btn-wa btn-sm btn-ic" onclick="waCliente('${c.id}')" title="WhatsApp"><i class="fab fa-whatsapp"></i></button>` : ''}
-            </div></td>
-          </tr>`;
-        }).join('');
-  }
-
-  const tb2 = document.getElementById('tb-rec');
-  if (tb2) {
-    tb2.innerHTML = !morosos.length
-      ? '<tr><td colspan="7" style="text-align:center;padding:28px;color:var(--muted)">✅ Sin recargos</td></tr>'
-      : morosos.map(c => {
-          const elapsed = Math.min(qsElapsed(c.inicio, c.producto), c.nq);
-          const atrasadas = Math.max(0, elapsed - c.pagadas);
-          const capitalAt = atrasadas * c.pq;
-          const rec = calcRecargoPorCliente(c);
-          const totalCobrar = capitalAt + rec.total;
-          const desglose = rec.periodos.map(p =>
-            `<span style="white-space:nowrap">Q${p.idx}: ${p.diasAtraso}d → $${p.recargo.toLocaleString('es-MX')}</span>`
-          ).join('<br>');
-          return `<tr>
-            <td><strong>${esc(c.nombre)}</strong></td>
-            <td><span class="badge br">${periodosLabel(atrasadas, c)}</span></td>
-            <td style="font-family:'DM Mono',monospace;font-size:.74rem;color:var(--muted);line-height:1.6">${desglose || '—'}</td>
-            <td><span style="font-family:'DM Mono',monospace;color:var(--warn);font-weight:700">+$${rec.total.toLocaleString('es-MX')}</span></td>
-            <td><span style="font-family:'DM Mono',monospace;color:var(--danger)">$${capitalAt.toLocaleString('es-MX')}</span></td>
-            <td><span style="font-family:'DM Mono',monospace;color:var(--accent);font-weight:700">$${totalCobrar.toLocaleString('es-MX')}</span></td>
-            <td><div style="display:flex;gap:5px">
-              <button class="btn btn-s btn-sm btn-ic" onclick="openReporte('${c.id}')" title="Reporte Personal" style="color:var(--purple)"><i class="fas fa-clipboard-list"></i></button>
-              <button class="btn btn-s btn-sm btn-ic" onclick="openEC('${c.id}')" title="Estado de cuenta"><i class="fas fa-file-invoice"></i></button>
-              ${c.telefono ? `<button class="btn btn-wa btn-sm btn-ic" onclick="waCliente('${c.id}')" title="WhatsApp"><i class="fab fa-whatsapp"></i></button>` : ''}
-            </div></td>
-          </tr>`;
-        }).join('');
-  }
-}
-
-/* ============================================================
-   MODAL / TOAST / VIEW HELPERS
-============================================================ */
-function esc(s){ const d=document.createElement('div'); d.textContent=String(s??''); return d.innerHTML; }
-function om(id){document.getElementById(id).classList.add('open')}
-function cm(id){document.getElementById(id).classList.remove('open')}
-function set(id,v){document.getElementById(id).textContent=v}
-function toast(msg,type='ok'){
-  const el=document.createElement('div');
-  el.className='toast '+type;
-  const ic=type==='ok'?'fa-check-circle':type==='err'?'fa-times-circle':type==='wa'?'fa-whatsapp':'fa-exclamation-triangle';
-  const col=type==='ok'?'var(--accent)':type==='err'?'var(--danger)':type==='wa'?'#25d366':'var(--warn)';
-  // Usar textContent para el mensaje — previene XSS con datos de usuario
-  const icon=document.createElement('i');
-  icon.className=(type==='wa'?'fab':'fas')+' '+ic;
-  icon.style.color=col;
-  const txt=document.createElement('span');
-  txt.textContent=msg;
-  el.appendChild(icon);
-  el.appendChild(document.createTextNode(' '));
-  el.appendChild(txt);
-  document.getElementById('toasts').appendChild(el);
-  setTimeout(()=>el.remove(),3800);
-}
-
-function gv(name){
-  document.querySelectorAll('.view').forEach(v=>v.classList.remove('on'));
-  document.querySelectorAll('.ni').forEach(n=>n.classList.remove('on'));
-  document.getElementById('v-'+name).classList.add('on');
-  document.querySelectorAll('.ni').forEach(n=>{
-    if(n.getAttribute('onclick')?.includes(name)) n.classList.add('on');
-  });
-  if(window.innerWidth<768){
-    document.getElementById('sidebar').classList.remove('open');
-    document.getElementById('sbov').classList.remove('open');
-  }
-  if(name==='dashboard') renderDash();
-  if(name==='checklist') renderCL();
-  if(name==='historial') renderH();
-  if(name==='reportes') renderRep();
-  if(name==='morosos') renderMorosos();
-}
-
-function toggleSB(){
-  document.getElementById('sidebar').classList.toggle('open');
-  document.getElementById('sbov').classList.toggle('open');
-}
-
-function refresh(){
-  autoBackup();
-  const activeId = document.querySelector('.view.on')?.id;
-  renderDash();
-  renderC();
-  renderCL();
-  // Vistas de solo lectura: render diferido — solo si están activas
-  if (activeId === 'v-historial') renderH();
-  if (activeId === 'v-reportes') renderRep();
-  renderMorosos();
-}
-
-/* ============================================================
-   VISIBILITYCHANGE — re-evaluar atrasos al volver a la pestaña
-   (cubre el caso donde el día cambia con la app abierta)
-============================================================ */
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && clientes.length) {
-    syncAlertas();
-    renderDash();
-    renderMorosos();
-  }
-});
-
-/* ============================================================
-   TECLA ESCAPE — cerrar cualquier modal abierto
-============================================================ */
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    document.querySelectorAll('.overlay.open').forEach(o => o.classList.remove('open'));
-  }
-});
-
-/* ============================================================
-   MANEJADOR GLOBAL DE ERRORES — evita fallos silenciosos
-============================================================ */
-window.addEventListener('unhandledrejection', e => {
-  console.error('HD Crédit — promise rejection:', e.reason);
-  if (e.reason?.message) toast('Error inesperado: ' + e.reason.message, 'err');
-});
-window.onerror = (msg, src, line) => {
-  console.error('HD Crédit — JS error:', msg, 'en línea', line);
-};
-
-/* ============================================================
-   QUINZENA SELECTOR INIT
-============================================================ */
-function initQSel(){
-  const sel=document.getElementById('qsel');
-  const qs=getQuincenas(12);
-  sel.innerHTML=qs.map(q=>`<option value="${q.key}">${q.label}</option>`).join('');
-  const cur=curQKey();
-  const opt=[...sel.options].find(o=>o.value===cur);
-  if(opt) sel.value=cur; else sel.selectedIndex=sel.options.length-1;
-}
-
-/* ============================================================
-   INIT
-============================================================ */
-function init(){
-  // Animate loader bar
-  setTimeout(()=>document.getElementById('lf').style.width='100%', 50);
-
-  initQSel();
-  renderTF();
-
-  const saved=localStorage.getItem('hd_fb');
-
-  // Hide loader after 1.6s then check config
-  setTimeout(()=>{
-    document.getElementById('loader').classList.add('hide');
-    setTimeout(()=>document.getElementById('loader').style.display='none',450);
-
-    if(!saved){
-      document.getElementById('fb-cfg').style.display='flex';
-      return;
-    }
-    if(saved==='local'){
-      loadLocal();
-      return;
-    }
-    try{
-      const cfg=JSON.parse(saved);
-      loadFirebaseSDK(cfg);
-    }catch(e){
-      loadLocal();
-    }
-  },1600);
-}
-
-// Expose globals
-window.openNew=openNew; window.editC=editC; window.saveC=saveC;
-window.onProductoChange=onProductoChange;
-window.calcPQ=calcPQ; window.confirmDel=confirmDel;
-window.togglePago=togglePago; window.openEC=openEC; window.sendEC=sendEC;
-window.waCliente=waCliente; window.waAll=waAll;
-window.filterC=filterC; window.filterH=filterH;
-window.renderCL=renderCL; window.gv=gv; window.toggleSB=toggleSB;
-window.doExport=doExport; window.doExportXLSX=doExportXLSX; window.doExportJSON=doExportJSON; window.doImportJSON=doImportJSON;
-window.connectFirebase=connectFirebase; window.goLocal=goLocal;
-window.loginGoogle=loginGoogle; window.logoutFB=logoutFB;
-window.om=om; window.cm=cm;
-window.initPago=initPago; window.undoLastPago=undoLastPago;
-window.switchMorososTab=switchMorososTab; window.renderMorosos=renderMorosos;
-window.openReporte=openReporte; window.sendReporte=sendReporte;
-window.openReverso=openReverso; window.selReverso=selReverso; window.doReverso=doReverso;
-
-init();
-</script>
+<!-- ?v= debe coincidir con HD_VERSION (arriba), sw.js y js/app.js -->
+<script src="js/datos.js?v=20261105"></script>
+<!-- Configuración del Firebase real: solo en la app publicada (el sitio de
+     prueba no lo incluye; sin él, la app se detiene con un error claro) -->
+<script src="js/config-real.js?v=20261105"></script>
+<script src="js/sesion.js?v=20261105"></script>
+<script src="js/sync.js?v=20261105"></script>
+<script src="js/negocio.js?v=20261105"></script>
+<script src="js/ui.js?v=20261105"></script>
+<script src="js/export.js?v=20261105"></script>
+<script src="js/rescate.js?v=20261105"></script>
+<script src="js/app.js?v=20261105"></script>
 </body>
 </html>
 
