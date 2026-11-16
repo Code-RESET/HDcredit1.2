@@ -359,7 +359,7 @@ function renderC(list) {
       <td><span style="font-family:'DM Mono',monospace;font-size:.76rem;color:var(--muted)">${fv}</span></td>
       <td><div style="display:flex;gap:5px">
         ${c.producto==='unico_30d' ? (c.saldo>0
-          ? `<button class="btn btn-s btn-sm btn-ic" data-pago="${c.id}_0" onclick="initPago('${c.id}',0)" title="Toca 2 veces para marcar pagado" style="color:var(--accent)"><i class="far fa-circle"></i></button>`
+          ? `<button class="btn btn-s btn-sm btn-ic" data-pago="${c.id}_0" onclick="initPago('${c.id}',0,'${curQKey()}')" title="Toca 2 veces para marcar pagado" style="color:var(--accent)"><i class="far fa-circle"></i></button>`
           : `<button class="btn btn-s btn-sm btn-ic" onclick="openReverso('${c.id}')" title="Pagado · clic para revertir" style="color:var(--accent)"><i class="fas fa-check"></i></button>`) : ''}
         <button class="btn btn-s btn-sm btn-ic" onclick="openReporte('${c.id}')" title="Reporte Personal" style="color:var(--purple)"><i class="fas fa-clipboard-list"></i></button>
         <button class="btn btn-s btn-sm btn-ic" onclick="openEC('${c.id}')" title="Estado de cuenta"><i class="fas fa-file-invoice"></i></button>
@@ -399,7 +399,12 @@ function calcVenc(inicio, nq, producto = 'quincenal_fijo') {
 /* ============================================================
    DOBLE TOQUE + DESHACER
 ============================================================ */
-async function initPago(cid, qIdx) {
+// qKeyFijo (opcional): para cobros que no pertenecen a ninguna quincena del
+// Checklist (p. ej. el préstamo a 30 días desde Acreditados) — sin esto, el
+// cobro se etiquetaba con lo que estuviera seleccionado en el menú del
+// Checklist, aunque no tuviera nada que ver, y podía no contarse en
+// "Cobrado Quincena Actual" del día real en que se cobró.
+async function initPago(cid, qIdx, qKeyFijo) {
   const key = cid + '_' + qIdx;
   const btn = document.querySelector(`[data-pago="${key}"]`);
   // Botón bloqueado mientras se procesa un movimiento de este acreditado
@@ -410,7 +415,7 @@ async function initPago(cid, qIdx) {
     delete _pendingPago[key];
     if (btn) { btn.classList.remove('confirming'); btn.innerHTML = _pendingOrigHtml[key] || ''; btn.disabled = true; }
     delete _pendingOrigHtml[key];
-    await registrarCobro(cid, qIdx, 'PAGO');
+    await registrarCobro(cid, qIdx, 'PAGO', qKeyFijo ? { qKey: qKeyFijo } : {});
   } else {
     // primer toque — pedir confirmación visual
     if (!btn) return;
